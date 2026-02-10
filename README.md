@@ -16,8 +16,6 @@ OptiLang is an educational interpreter for a Python-like language (PyLite) that 
 - **Quantitative scoring** (0-100) for code quality
 - **Pattern detection** for 8+ common performance issues
 
-This is a Final Year Project for BSc CSIT, Tribhuvan University, Nepal.
-
 ---
 
 ## 🚀 Quick Start
@@ -165,18 +163,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Manik Kumar Shrestha** - [GitHub](https://github.com/Sthamanik)
 - **Om Shree Mahat** - *Developer*
 - **Aashish Rimal** - *Developer*
-
-**Supervisor**: Dr. Supervisor Name, Tribhuvan University
-
----
-
-## 🎓 Academic Context
-
-This project is submitted as a Final Year Project for:
-- **Program**: BSc CSIT
-- **Institution**: Tribhuvan University, Nepal
-- **Duration**: 12 weeks (Sprint 1-4)
-- **Year**: 2025
 
 ---
 
