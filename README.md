@@ -98,13 +98,12 @@ for suggestion in report.suggestions:
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/optilang.git
+git clone https://github.com/Sthamanik/optilang.git
 cd optilang
 
 # Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or venv\Scripts\activate on Windows
+conda create -n optilang python -y
+conda activate optilang
 
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
@@ -163,9 +162,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👥 Team
 
-- **Your Name** - *Lead Developer* - [GitHub](https://github.com/YOUR_USERNAME)
-- **Team Member 2** - *Developer*
-- **Team Member 3** - *Developer*
+- **Manik Kumar Shrestha** - [GitHub](https://github.com/Sthamanik)
+- **Om Shree Mahat** - *Developer*
+- **Aashish Rimal** - *Developer*
 
 **Supervisor**: Dr. Supervisor Name, Tribhuvan University
 
@@ -184,8 +183,8 @@ This project is submitted as a Final Year Project for:
 ## 📧 Contact
 
 For questions or feedback:
-- **Email**: your.email@example.com
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/optilang/issues)
+- **Email**: shresthamanik1820@gmail.com
+- **Issues**: [GitHub Issues](https://github.com/Sthamanik/optilang/issues)
 
 ---
 

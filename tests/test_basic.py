@@ -3,7 +3,7 @@ Basic tests to verify setup.
 """
 
 import pytest
-from interpreter.models import ExecutionResult, Suggestion, OptimizationReport
+from optilang.models import ExecutionResult, Suggestion, OptimizationReport
 
 
 def test_execution_result_creation():
