@@ -56,15 +56,15 @@ Grammar (Simplified):
 """
 
 from typing import List, Optional, Union
-from token import Token, TokenType
-from ast_nodes import (
+from .token import Token, TokenType
+from .ast_nodes import (
     ASTNode, ProgramNode, NumberNode, StringNode, BooleanNode, NullNode,
     IdentifierNode, BinaryOpNode, UnaryOpNode, AssignmentNode, AugmentedAssignmentNode,
     IfNode, WhileNode, ForNode, BreakNode, ContinueNode, PassNode,
     FunctionDefNode, FunctionCallNode, ReturnNode,
     ListNode, DictNode, IndexNode, TryNode
 )
-from utils.errors import ParserError
+from .utils.errors import ParserError
 
 class Parser:
     """
