@@ -9,9 +9,14 @@ y = 3
 print(x + y)
 """.strip()
     )
+    print("test_execute_arithmetic_and_assignment")
+    print("OUTPUT:", result.output)
+    print("ERRORS:", result.errors)
+    print("SYMBOL_TABLE:", result.symbol_table)
 
     assert result.errors == []
     assert result.output == "5"
+    assert result.symbol_table == {"x": 2, "y": 3}
 
 
 def test_execute_control_flow_and_augmented_assignment():
@@ -27,6 +32,10 @@ else:
     print(0)
 """.strip()
     )
+    print("test_execute_control_flow_and_augmented_assignment")
+    print("OUTPUT:", result.output)
+    print("ERRORS:", result.errors)
+    print("SYMBOL_TABLE:", result.symbol_table)
 
     assert result.errors == []
     assert result.output == "10"
@@ -43,9 +52,14 @@ def factorial(n):
 print(factorial(5))
 """.strip()
     )
+    print("test_execute_user_defined_function_and_return")
+    print("OUTPUT:", result.output)
+    print("ERRORS:", result.errors)
+    print("SYMBOL_TABLE:", result.symbol_table)
 
     assert result.errors == []
     assert result.output == "120"
+    assert result.symbol_table["factorial"] == "<function factorial>"
 
 
 def test_execute_try_except_finally():
@@ -59,6 +73,10 @@ finally:
     print("done")
 """.strip()
     )
+    print("test_execute_try_except_finally")
+    print("OUTPUT:", result.output)
+    print("ERRORS:", result.errors)
+    print("SYMBOL_TABLE:", result.symbol_table)
 
     assert result.errors == []
     assert result.output == "handled\ndone"
@@ -70,7 +88,12 @@ def test_execute_reports_runtime_errors():
 print(missing_name)
 """.strip()
     )
+    print("test_execute_reports_runtime_errors")
+    print("OUTPUT:", result.output)
+    print("ERRORS:", result.errors)
+    print("SYMBOL_TABLE:", result.symbol_table)
 
     assert result.output == ""
     assert len(result.errors) == 1
     assert "missing_name" in result.errors[0]
+    assert result.symbol_table == {}

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .ast_nodes import (
     ASTNode,
@@ -149,6 +149,7 @@ class Executor:
 
         self.globals = Environment()
         self._install_builtins()
+        self._builtin_names = set(self.globals.values.keys())
 
     def run(self, program: ProgramNode) -> ExecutionResult:
         self._start_time = time.perf_counter()
@@ -168,6 +169,7 @@ class Executor:
             errors=errors,
             execution_time=elapsed,
             profiling=None,
+            symbol_table=self.get_symbol_table(include_builtins=False),
         )
 
     def _install_builtins(self) -> None:
@@ -450,6 +452,22 @@ class Executor:
     def _truthy(value: Any) -> bool:
         return bool(value)
 
+    def _serialize_symbol_value(self, value: Any) -> Any:
+        if isinstance(value, UserFunction):
+            return f"<function {value.name}>"
+        if callable(value):
+            name = getattr(value, "__name__", type(value).__name__)
+            return f"<builtin {name}>"
+        return value
+
+    def get_symbol_table(self, include_builtins: bool = False) -> Dict[str, Any]:
+        table: Dict[str, Any] = {}
+        for name, value in self.globals.values.items():
+            if not include_builtins and name in self._builtin_names:
+                continue
+            table[name] = self._serialize_symbol_value(value)
+        return table
+
 
 def execute(source: str, timeout_seconds: float = 5.0) -> ExecutionResult:
     """
@@ -468,4 +486,5 @@ def execute(source: str, timeout_seconds: float = 5.0) -> ExecutionResult:
             errors=[str(exc)],
             execution_time=elapsed,
             profiling=None,
+            symbol_table={},
         )

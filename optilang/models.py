@@ -14,6 +14,7 @@ class ExecutionResult:
     errors: List[str] = field(default_factory=list)
     execution_time: float = 0.0
     profiling: Optional[Dict[str, Any]] = None
+    symbol_table: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
