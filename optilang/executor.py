@@ -37,6 +37,7 @@ from .ast_nodes import (
 from .lexer import tokenize
 from .models import ExecutionResult
 from .parser import parse
+from .profiler import Profiler  # NEW IMPORT
 from .utils.errors import (
     ArgumentError,
     IndexError as OptiIndexError,
@@ -126,12 +127,19 @@ class UserFunction:
         for param, arg in zip(self.node.parameters, args):
             frame.define(param.name, arg)
 
+        # PROFILER: Start tracking function call
+        if executor.profiler:
+            executor.profiler.start_function_call(self.name)
+
         try:
             executor._execute_block(self.node.body, frame)
             return None
         except _ReturnSignal as signal:
             return signal.value
         finally:
+            # PROFILER: End tracking function call
+            if executor.profiler:
+                executor.profiler.end_function_call(self.name)
             executor._call_depth -= 1
 
 
@@ -140,12 +148,23 @@ class Executor:
     AST executor for OptiLang programs.
     """
 
-    def __init__(self, timeout_seconds: float = 5.0):
+    def __init__(
+        self, 
+        timeout_seconds: float = 5.0,
+        profiler: Optional[Profiler] = None,  # NEW PARAMETER
+        enable_profiling: bool = True  # NEW PARAMETER
+    ):
         self.timeout_seconds = timeout_seconds
         self._start_time = 0.0
         self._output: List[str] = []
         self.max_recursion_depth = 1000
         self._call_depth = 0
+
+        # PROFILER: Initialize profiler
+        if enable_profiling and profiler is None:
+            self.profiler = Profiler()
+        else:
+            self.profiler = profiler
 
         self.globals = Environment()
         self._install_builtins()
@@ -156,19 +175,31 @@ class Executor:
         self._output = []
         errors: List[str] = []
 
+        # PROFILER: Start profiling session
+        if self.profiler:
+            self.profiler.start()
+
         try:
             self._execute_program(program)
         except OptiRuntimeError as exc:
             errors.append(str(exc))
         except Exception as exc:  # pragma: no cover - unexpected fallback
             errors.append(f"Runtime error: {exc}")
+        finally:
+            # PROFILER: Stop profiling session
+            if self.profiler:
+                self.profiler.stop()
 
         elapsed = time.perf_counter() - self._start_time
+        
+        # PROFILER: Get profiling data
+        profiling_data = self.profiler.get_data() if self.profiler else None
+        
         return ExecutionResult(
             output="".join(self._output).rstrip("\n"),
             errors=errors,
             execution_time=elapsed,
-            profiling=None,
+            profiling=profiling_data,  # Include profiling data
             symbol_table=self.get_symbol_table(include_builtins=False),
         )
 
@@ -203,6 +234,23 @@ class Executor:
             self._execute_statement(statement, env)
 
     def _execute_statement(self, node: ASTNode, env: Environment) -> None:
+        # PROFILER: Start profiling this line
+        line_num = getattr(node, 'line', 0)
+        var_count = self._count_variables(env)
+        
+        if self.profiler:
+            self.profiler.start_line(line_num, var_count)
+
+        try:
+            # Execute the statement
+            self._execute_statement_impl(node, env)
+        finally:
+            # PROFILER: End profiling this line
+            if self.profiler:
+                self.profiler.end_line(line_num)
+
+    def _execute_statement_impl(self, node: ASTNode, env: Environment) -> None:
+        """Actual statement execution logic (separated for profiling)."""
         if isinstance(node, AssignmentNode):
             env.assign(node.target.name, self._eval(node.value, env))
             return
@@ -448,6 +496,13 @@ class Executor:
 
         raise OptiTypeError("Object is not indexable", node.line)
 
+    def _count_variables(self, env: Environment) -> int:
+        """Count total variables in scope chain for memory profiling."""
+        count = len(env.values)
+        if env.parent is not None:
+            count += self._count_variables(env.parent)
+        return count
+
     @staticmethod
     def _truthy(value: Any) -> bool:
         return bool(value)
@@ -469,16 +524,31 @@ class Executor:
         return table
 
 
-def execute(source: str, timeout_seconds: float = 5.0) -> ExecutionResult:
+def execute(
+    source: str, 
+    timeout_seconds: float = 5.0,
+    enable_profiling: bool = True  # NEW PARAMETER
+) -> ExecutionResult:
     """
     Parse and execute OptiLang source code.
+    
+    Args:
+        source: OptiLang source code
+        timeout_seconds: Maximum execution time
+        enable_profiling: Whether to collect profiling data (default: True)
+    
+    Returns:
+        ExecutionResult with output, errors, execution time, and profiling data
     """
     start = time.perf_counter()
 
     try:
         tokens = tokenize(source)
         program = parse(tokens)
-        return Executor(timeout_seconds=timeout_seconds).run(program)
+        return Executor(
+            timeout_seconds=timeout_seconds,
+            enable_profiling=enable_profiling
+        ).run(program)
     except (LexerError, ParserError, OptiRuntimeError) as exc:
         elapsed = time.perf_counter() - start
         return ExecutionResult(
