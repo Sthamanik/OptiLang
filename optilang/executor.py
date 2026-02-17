@@ -149,10 +149,10 @@ class Executor:
     """
 
     def __init__(
-        self, 
+        self,
         timeout_seconds: float = 5.0,
         profiler: Optional[Profiler] = None,  # NEW PARAMETER
-        enable_profiling: bool = True  # NEW PARAMETER
+        enable_profiling: bool = True,  # NEW PARAMETER
     ):
         self.timeout_seconds = timeout_seconds
         self._start_time = 0.0
@@ -191,10 +191,10 @@ class Executor:
                 self.profiler.stop()
 
         elapsed = time.perf_counter() - self._start_time
-        
+
         # PROFILER: Get profiling data
         profiling_data = self.profiler.get_data() if self.profiler else None
-        
+
         return ExecutionResult(
             output="".join(self._output).rstrip("\n"),
             errors=errors,
@@ -235,9 +235,9 @@ class Executor:
 
     def _execute_statement(self, node: ASTNode, env: Environment) -> None:
         # PROFILER: Start profiling this line
-        line_num = getattr(node, 'line', 0)
+        line_num = getattr(node, "line", 0)
         var_count = self._count_variables(env)
-        
+
         if self.profiler:
             self.profiler.start_line(line_num, var_count)
 
@@ -362,7 +362,9 @@ class Executor:
                     raise OptiTypeError(f"Invalid unary '-': {exc}", node.line)
             if node.operator == "not":
                 return not self._truthy(operand)
-            raise OptiRuntimeError(f"Unsupported unary operator: {node.operator}", node.line)
+            raise OptiRuntimeError(
+                f"Unsupported unary operator: {node.operator}", node.line
+            )
 
         if isinstance(node, FunctionCallNode):
             callee = env.get(node.function.name, node.function)
@@ -388,7 +390,9 @@ class Executor:
             index = self._eval(node.index, env)
             return self._index(collection, index, node)
 
-        raise OptiRuntimeError(f"Unsupported AST node: {type(node).__name__}", node.line)
+        raise OptiRuntimeError(
+            f"Unsupported AST node: {type(node).__name__}", node.line
+        )
 
     def _eval_binary(self, node: BinaryOpNode, env: Environment) -> Any:
         op = node.operator
@@ -427,7 +431,7 @@ class Executor:
                     raise OptiZeroDivisionError(node.line)
                 return left % right
             if op == "**":
-                return left ** right
+                return left**right
             if op == "==":
                 return left == right
             if op == "!=":
@@ -525,18 +529,18 @@ class Executor:
 
 
 def execute(
-    source: str, 
+    source: str,
     timeout_seconds: float = 5.0,
-    enable_profiling: bool = True  # NEW PARAMETER
+    enable_profiling: bool = True,  # NEW PARAMETER
 ) -> ExecutionResult:
     """
     Parse and execute OptiLang source code.
-    
+
     Args:
         source: OptiLang source code
         timeout_seconds: Maximum execution time
         enable_profiling: Whether to collect profiling data (default: True)
-    
+
     Returns:
         ExecutionResult with output, errors, execution time, and profiling data
     """
@@ -546,8 +550,7 @@ def execute(
         tokens = tokenize(source)
         program = parse(tokens)
         return Executor(
-            timeout_seconds=timeout_seconds,
-            enable_profiling=enable_profiling
+            timeout_seconds=timeout_seconds, enable_profiling=enable_profiling
         ).run(program)
     except (LexerError, ParserError, OptiRuntimeError) as exc:
         elapsed = time.perf_counter() - start

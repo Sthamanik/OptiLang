@@ -1,9 +1,11 @@
 """
 Converts source code into tokens
 """
+
 from typing import List, Optional
 from .token import Token, TokenType
 from .utils.errors import LexerError
+
 
 class Lexer:
     def __init__(self, source: str):
@@ -35,7 +37,7 @@ class Lexer:
         char = self.source[self.pos]
         self.pos += 1
 
-        if char == '\n':
+        if char == "\n":
             self.line += 1
             self.column = 1
         else:
@@ -45,16 +47,16 @@ class Lexer:
 
     def skip_whitespace(self):
         """Skip spaces and tabs (but not newlines)"""
-        while self.current_char() in (' ', '\t'):
+        while self.current_char() in (" ", "\t"):
             self.advance()
 
     def skip_comment(self):
         """Skip single-line comments starting with #"""
         char = self.current_char()
-        if char == '#':
+        if char == "#":
             while True:
                 char = self.current_char()
-                if not char or char == '\n':
+                if not char or char == "\n":
                     break
                 self.advance()
 
@@ -62,17 +64,17 @@ class Lexer:
         """Read a number token (integer or float)"""
         start_line = self.line
         start_column = self.column
-        num_str = ''
+        num_str = ""
         has_dot = False
 
         char = self.current_char()
-        while char and (char.isdigit() or char == '.'):
-            if char == '.':
+        while char and (char.isdigit() or char == "."):
+            if char == ".":
                 if has_dot:
                     raise LexerError(
                         "Invalid number format: multiple decimal points",
                         start_line,
-                        start_column
+                        start_column,
                     )
                 has_dot = True
             num_str += char
@@ -80,11 +82,11 @@ class Lexer:
             char = self.current_char()
 
         # Check if number ends with a dot
-        if num_str.endswith('.'):
+        if num_str.endswith("."):
             raise LexerError(
                 "Invalid number format: ends with decimal point",
                 start_line,
-                start_column
+                start_column,
             )
 
         value = float(num_str) if has_dot else int(num_str)
@@ -96,22 +98,22 @@ class Lexer:
         start_column = self.column
 
         self.advance()  # Skip opening quote
-        string_value = ''
+        string_value = ""
 
         char = self.current_char()
         while char and char != quote:
-            if char == '\\':
+            if char == "\\":
                 self.advance()
                 # Handle escape sequences
                 escape_char = self.current_char()
-                if escape_char == 'n':
-                    string_value += '\n'
-                elif escape_char == 't':
-                    string_value += '\t'
-                elif escape_char == 'r':
-                    string_value += '\r'
-                elif escape_char == '\\':
-                    string_value += '\\'
+                if escape_char == "n":
+                    string_value += "\n"
+                elif escape_char == "t":
+                    string_value += "\t"
+                elif escape_char == "r":
+                    string_value += "\r"
+                elif escape_char == "\\":
+                    string_value += "\\"
                 elif escape_char == quote:
                     string_value += quote
                 elif escape_char:
@@ -123,11 +125,7 @@ class Lexer:
             char = self.current_char()
 
         if not char:
-            raise LexerError(
-                "Unterminated string",
-                start_line,
-                start_column
-            )
+            raise LexerError("Unterminated string", start_line, start_column)
 
         self.advance()  # Skip closing quote
         return Token(TokenType.STRING, string_value, start_line, start_column)
@@ -136,19 +134,16 @@ class Lexer:
         """Read an identifier or keyword token"""
         start_line = self.line
         start_column = self.column
-        identifier = ''
+        identifier = ""
 
         char = self.current_char()
-        while char and (char.isalnum() or char == '_'):
+        while char and (char.isalnum() or char == "_"):
             identifier += char
             self.advance()
             char = self.current_char()
 
         # Check if it's a keyword
-        token_type = TokenType.KEYWORDS.get(
-            identifier,
-            TokenType.IDENTIFIER
-        )
+        token_type = TokenType.KEYWORDS.get(identifier, TokenType.IDENTIFIER)
 
         # For boolean and None literals, convert to actual values
         if token_type == TokenType.TRUE:
@@ -174,8 +169,8 @@ class Lexer:
 
         # Count spaces (4 spaces = 1 indent level)
         char = self.current_char()
-        while char in (' ', '\t'):
-            if char == ' ':
+        while char in (" ", "\t"):
+            if char == " ":
                 indent_level += 1
             else:  # Tab counts as 4 spaces
                 indent_level += 4
@@ -188,9 +183,7 @@ class Lexer:
         # Check if indentation is valid (must be multiple of 4)
         if indent_level % 4 != 0:
             raise LexerError(
-                "Indentation must be multiple of 4 spaces",
-                self.line,
-                start_column
+                "Indentation must be multiple of 4 spaces", self.line, start_column
             )
 
         tokens = []
@@ -208,20 +201,13 @@ class Lexer:
                 self.indent_stack.pop()
                 tokens.append(
                     Token(
-                        TokenType.DEDENT,
-                        self.indent_stack[-1],
-                        self.line,
-                        start_column
+                        TokenType.DEDENT, self.indent_stack[-1], self.line, start_column
                     )
                 )
 
             # Check if we dedented to a valid level
             if self.indent_stack[-1] != indent_units:
-                raise LexerError(
-                    "Invalid indentation level",
-                    self.line,
-                    start_column
-                )
+                raise LexerError("Invalid indentation level", self.line, start_column)
 
         return tokens
 
@@ -249,12 +235,12 @@ class Lexer:
                 break
 
             # Handle indentation at line start
-            if line_start and char in (' ', '\t'):
+            if line_start and char in (" ", "\t"):
                 indent_tokens = self.handle_indentation(True)
                 self.tokens.extend(indent_tokens)
                 char = self.current_char()
                 line_start = False
-            elif line_start and char not in ('\n', '\r'):
+            elif line_start and char not in ("\n", "\r"):
                 # No indentation, but not a blank line
                 indent_tokens = self.handle_indentation(True)
                 self.tokens.extend(indent_tokens)
@@ -267,24 +253,18 @@ class Lexer:
             start_column = self.column
 
             # Newline
-            if char == '\n':
+            if char == "\n":
                 # Only add NEWLINE if previous token wasn't NEWLINE
-                if not self.tokens or \
-                   self.tokens[-1].type != TokenType.NEWLINE:
+                if not self.tokens or self.tokens[-1].type != TokenType.NEWLINE:
                     self.tokens.append(
-                        Token(
-                            TokenType.NEWLINE,
-                            '\n',
-                            start_line,
-                            start_column
-                        )
+                        Token(TokenType.NEWLINE, "\n", start_line, start_column)
                     )
                 self.advance()
                 line_start = True
                 continue
 
             # Skip carriage return
-            if char == '\r':
+            if char == "\r":
                 self.advance()
                 continue
 
@@ -299,111 +279,78 @@ class Lexer:
                 continue
 
             # Identifiers and keywords
-            if char.isalpha() or char == '_':
+            if char.isalpha() or char == "_":
                 self.tokens.append(self.read_identifier())
                 continue
 
             # Two-character operators
-            if char == '=' and self.peek_char() == '=':
+            if char == "=" and self.peek_char() == "=":
+                self.tokens.append(Token(TokenType.EQ, "==", start_line, start_column))
+                self.advance()
+                self.advance()
+                continue
+
+            if char == "!" and self.peek_char() == "=":
+                self.tokens.append(Token(TokenType.NE, "!=", start_line, start_column))
+                self.advance()
+                self.advance()
+                continue
+
+            if char == "<" and self.peek_char() == "=":
+                self.tokens.append(Token(TokenType.LE, "<=", start_line, start_column))
+                self.advance()
+                self.advance()
+                continue
+
+            if char == ">" and self.peek_char() == "=":
+                self.tokens.append(Token(TokenType.GE, ">=", start_line, start_column))
+                self.advance()
+                self.advance()
+                continue
+
+            if char == "*" and self.peek_char() == "*":
                 self.tokens.append(
-                    Token(TokenType.EQ, '==', start_line, start_column)
+                    Token(TokenType.POWER, "**", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
                 continue
 
-            if char == '!' and self.peek_char() == '=':
+            if char == "/" and self.peek_char() == "/":
                 self.tokens.append(
-                    Token(TokenType.NE, '!=', start_line, start_column)
+                    Token(TokenType.FLOOR_DIVIDE, "//", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
                 continue
 
-            if char == '<' and self.peek_char() == '=':
+            if char == "+" and self.peek_char() == "=":
                 self.tokens.append(
-                    Token(TokenType.LE, '<=', start_line, start_column)
+                    Token(TokenType.PLUS_ASSIGN, "+=", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
                 continue
 
-            if char == '>' and self.peek_char() == '=':
+            if char == "-" and self.peek_char() == "=":
                 self.tokens.append(
-                    Token(TokenType.GE, '>=', start_line, start_column)
+                    Token(TokenType.MINUS_ASSIGN, "-=", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
                 continue
 
-            if char == '*' and self.peek_char() == '*':
+            if char == "*" and self.peek_char() == "=":
                 self.tokens.append(
-                    Token(TokenType.POWER, '**', start_line, start_column)
+                    Token(TokenType.MULTIPLY_ASSIGN, "*=", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
                 continue
 
-            if char == '/' and self.peek_char() == '/':
+            if char == "/" and self.peek_char() == "=":
                 self.tokens.append(
-                    Token(
-                        TokenType.FLOOR_DIVIDE,
-                        '//',
-                        start_line,
-                        start_column
-                    )
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == '+' and self.peek_char() == '=':
-                self.tokens.append(
-                    Token(
-                        TokenType.PLUS_ASSIGN,
-                        '+=',
-                        start_line,
-                        start_column
-                    )
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == '-' and self.peek_char() == '=':
-                self.tokens.append(
-                    Token(
-                        TokenType.MINUS_ASSIGN,
-                        '-=',
-                        start_line,
-                        start_column
-                    )
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == '*' and self.peek_char() == '=':
-                self.tokens.append(
-                    Token(
-                        TokenType.MULTIPLY_ASSIGN,
-                        '*=',
-                        start_line,
-                        start_column
-                    )
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == '/' and self.peek_char() == '=':
-                self.tokens.append(
-                    Token(
-                        TokenType.DIVIDE_ASSIGN,
-                        '/=',
-                        start_line,
-                        start_column
-                    )
+                    Token(TokenType.DIVIDE_ASSIGN, "/=", start_line, start_column)
                 )
                 self.advance()
                 self.advance()
@@ -411,54 +358,42 @@ class Lexer:
 
             # Single-character operators and delimiters
             single_char_tokens = {
-                '+': TokenType.PLUS,
-                '-': TokenType.MINUS,
-                '*': TokenType.MULTIPLY,
-                '/': TokenType.DIVIDE,
-                '%': TokenType.MODULO,
-                '=': TokenType.ASSIGN,
-                '<': TokenType.LT,
-                '>': TokenType.GT,
-                '(': TokenType.LPAREN,
-                ')': TokenType.RPAREN,
-                '[': TokenType.LBRACKET,
-                ']': TokenType.RBRACKET,
-                '{': TokenType.LBRACE,
-                '}': TokenType.RBRACE,
-                ',': TokenType.COMMA,
-                ':': TokenType.COLON,
-                '.': TokenType.DOT,
+                "+": TokenType.PLUS,
+                "-": TokenType.MINUS,
+                "*": TokenType.MULTIPLY,
+                "/": TokenType.DIVIDE,
+                "%": TokenType.MODULO,
+                "=": TokenType.ASSIGN,
+                "<": TokenType.LT,
+                ">": TokenType.GT,
+                "(": TokenType.LPAREN,
+                ")": TokenType.RPAREN,
+                "[": TokenType.LBRACKET,
+                "]": TokenType.RBRACKET,
+                "{": TokenType.LBRACE,
+                "}": TokenType.RBRACE,
+                ",": TokenType.COMMA,
+                ":": TokenType.COLON,
+                ".": TokenType.DOT,
             }
 
             if char in single_char_tokens:
                 self.tokens.append(
-                    Token(
-                        single_char_tokens[char],
-                        char,
-                        start_line,
-                        start_column
-                    )
+                    Token(single_char_tokens[char], char, start_line, start_column)
                 )
                 self.advance()
                 continue
 
             # Unknown character
             raise LexerError(
-                f"Unexpected character: '{char}'",
-                start_line,
-                start_column
+                f"Unexpected character: '{char}'", start_line, start_column
             )
 
         # Add remaining DEDENT tokens for unclosed indents
         while len(self.indent_stack) > 1:
             self.indent_stack.pop()
             self.tokens.append(
-                Token(
-                    TokenType.DEDENT,
-                    self.indent_stack[-1],
-                    self.line,
-                    self.column
-                )
+                Token(TokenType.DEDENT, self.indent_stack[-1], self.line, self.column)
             )
 
         # Add EOF token
@@ -472,7 +407,7 @@ class Lexer:
         Useful for debugging
         """
         tokens = self.tokenize()
-        return '\n'.join(str(token) for token in tokens)
+        return "\n".join(str(token) for token in tokens)
 
 
 def tokenize(source: str) -> List[Token]:

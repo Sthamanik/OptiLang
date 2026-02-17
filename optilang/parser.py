@@ -58,13 +58,33 @@ Grammar (Simplified):
 from typing import List, Optional, Union
 from .token import Token, TokenType
 from .ast_nodes import (
-    ASTNode, ProgramNode, NumberNode, StringNode, BooleanNode, NullNode,
-    IdentifierNode, BinaryOpNode, UnaryOpNode, AssignmentNode, AugmentedAssignmentNode,
-    IfNode, WhileNode, ForNode, BreakNode, ContinueNode, PassNode,
-    FunctionDefNode, FunctionCallNode, ReturnNode,
-    ListNode, DictNode, IndexNode, TryNode
+    ASTNode,
+    ProgramNode,
+    NumberNode,
+    StringNode,
+    BooleanNode,
+    NullNode,
+    IdentifierNode,
+    BinaryOpNode,
+    UnaryOpNode,
+    AssignmentNode,
+    AugmentedAssignmentNode,
+    IfNode,
+    WhileNode,
+    ForNode,
+    BreakNode,
+    ContinueNode,
+    PassNode,
+    FunctionDefNode,
+    FunctionCallNode,
+    ReturnNode,
+    ListNode,
+    DictNode,
+    IndexNode,
+    TryNode,
 )
 from .utils.errors import ParserError
+
 
 class Parser:
     """
@@ -143,7 +163,7 @@ class Parser:
         if self.current_token.type != token_type:
             raise ParserError(
                 f"Expected {token_type} but got {self.current_token.type}",
-                self.current_token
+                self.current_token,
             )
 
         return self.advance()
@@ -184,11 +204,7 @@ class Parser:
             self.expect(TokenType.EOF)
 
             # Create program node with line 1, col 1
-            return ProgramNode(
-                line=1,
-                column=1,
-                statements=statements
-            )
+            return ProgramNode(line=1, column=1, statements=statements)
         except ParserError:
             raise
         except Exception as e:
@@ -271,8 +287,10 @@ class Parser:
                 if next_token and next_token.type == TokenType.ASSIGN:
                     return self.parse_assignment()
                 elif next_token and next_token.type in (
-                    TokenType.PLUS_ASSIGN, TokenType.MINUS_ASSIGN,
-                    TokenType.MULTIPLY_ASSIGN, TokenType.DIVIDE_ASSIGN
+                    TokenType.PLUS_ASSIGN,
+                    TokenType.MINUS_ASSIGN,
+                    TokenType.MULTIPLY_ASSIGN,
+                    TokenType.DIVIDE_ASSIGN,
                 ):
                     return self.parse_augmented_assignment()
 
@@ -314,9 +332,7 @@ class Parser:
         # Get identifier
         id_token = self.expect(TokenType.IDENTIFIER)
         target = IdentifierNode(
-            line=id_token.line,
-            column=id_token.column,
-            name=id_token.value
+            line=id_token.line, column=id_token.column, name=id_token.value
         )
 
         # Consume '='
@@ -326,10 +342,7 @@ class Parser:
         value = self.parse_expression()
 
         return AssignmentNode(
-            line=id_token.line,
-            column=id_token.column,
-            target=target,
-            value=value
+            line=id_token.line, column=id_token.column, target=target, value=value
         )
 
     def parse_augmented_assignment(self) -> AugmentedAssignmentNode:
@@ -342,22 +355,23 @@ class Parser:
         # Get identifier
         id_token = self.expect(TokenType.IDENTIFIER)
         target = IdentifierNode(
-            line=id_token.line,
-            column=id_token.column,
-            name=id_token.value
+            line=id_token.line, column=id_token.column, name=id_token.value
         )
 
         # Get operator (+=, -=, etc.)
         if self.current_token is None:
-            raise ParserError("Expected augmented assignment operator but reached end of file")
+            raise ParserError(
+                "Expected augmented assignment operator but reached end of file"
+            )
 
         if not self.match(
-            TokenType.PLUS_ASSIGN, TokenType.MINUS_ASSIGN,
-            TokenType.MULTIPLY_ASSIGN, TokenType.DIVIDE_ASSIGN
+            TokenType.PLUS_ASSIGN,
+            TokenType.MINUS_ASSIGN,
+            TokenType.MULTIPLY_ASSIGN,
+            TokenType.DIVIDE_ASSIGN,
         ):
             raise ParserError(
-                "Expected augmented assignment operator",
-                self.current_token
+                "Expected augmented assignment operator", self.current_token
             )
 
         op_token = self.current_token
@@ -371,7 +385,7 @@ class Parser:
             column=id_token.column,
             target=target,
             operator=op_token.value,
-            value=value
+            value=value,
         )
 
     # ===== Control Flow Statements =====
@@ -416,7 +430,7 @@ class Parser:
             condition=condition,
             if_block=if_block,
             elif_parts=elif_parts,
-            else_block=else_block
+            else_block=else_block,
         )
 
     def parse_while_statement(self) -> WhileNode:
@@ -441,7 +455,7 @@ class Parser:
             line=while_token.line,
             column=while_token.column,
             condition=condition,
-            body=body
+            body=body,
         )
 
     def parse_for_statement(self) -> ForNode:
@@ -456,9 +470,7 @@ class Parser:
         # Parse iterator variable
         iter_token = self.expect(TokenType.IDENTIFIER)
         iterator = IdentifierNode(
-            line=iter_token.line,
-            column=iter_token.column,
-            name=iter_token.value
+            line=iter_token.line, column=iter_token.column, name=iter_token.value
         )
 
         # Expect 'in'
@@ -478,7 +490,7 @@ class Parser:
             column=for_token.column,
             iterator=iterator,
             iterable=iterable,
-            body=body
+            body=body,
         )
 
     # ===== Function Statements =====
@@ -495,9 +507,7 @@ class Parser:
         # Parse function name
         name_token = self.expect(TokenType.IDENTIFIER)
         name = IdentifierNode(
-            line=name_token.line,
-            column=name_token.column,
-            name=name_token.value
+            line=name_token.line, column=name_token.column, name=name_token.value
         )
 
         # Parse parameters
@@ -507,20 +517,24 @@ class Parser:
         if not self.match(TokenType.RPAREN):
             # Parse parameter list
             param_token = self.expect(TokenType.IDENTIFIER)
-            parameters.append(IdentifierNode(
-                line=param_token.line,
-                column=param_token.column,
-                name=param_token.value
-            ))
+            parameters.append(
+                IdentifierNode(
+                    line=param_token.line,
+                    column=param_token.column,
+                    name=param_token.value,
+                )
+            )
 
             while self.match(TokenType.COMMA):
                 self.advance()
                 param_token = self.expect(TokenType.IDENTIFIER)
-                parameters.append(IdentifierNode(
-                    line=param_token.line,
-                    column=param_token.column,
-                    name=param_token.value
-                ))
+                parameters.append(
+                    IdentifierNode(
+                        line=param_token.line,
+                        column=param_token.column,
+                        name=param_token.value,
+                    )
+                )
 
         self.expect(TokenType.RPAREN)
 
@@ -535,7 +549,7 @@ class Parser:
             column=def_token.column,
             name=name,
             parameters=parameters,
-            body=body
+            body=body,
         )
 
     def parse_return_statement(self) -> ReturnNode:
@@ -553,9 +567,7 @@ class Parser:
             value = self.parse_expression()
 
         return ReturnNode(
-            line=return_token.line,
-            column=return_token.column,
-            value=value
+            line=return_token.line, column=return_token.column, value=value
         )
 
     # ===== Jump Statements =====
@@ -563,26 +575,17 @@ class Parser:
     def parse_break_statement(self) -> BreakNode:
         """Parse break statement"""
         break_token = self.expect(TokenType.BREAK)
-        return BreakNode(
-            line=break_token.line,
-            column=break_token.column
-        )
+        return BreakNode(line=break_token.line, column=break_token.column)
 
     def parse_continue_statement(self) -> ContinueNode:
         """Parse continue statement"""
         continue_token = self.expect(TokenType.CONTINUE)
-        return ContinueNode(
-            line=continue_token.line,
-            column=continue_token.column
-        )
+        return ContinueNode(line=continue_token.line, column=continue_token.column)
 
     def parse_pass_statement(self) -> PassNode:
         """Parse pass statement"""
         pass_token = self.expect(TokenType.PASS)
-        return PassNode(
-            line=pass_token.line,
-            column=pass_token.column
-        )
+        return PassNode(line=pass_token.line, column=pass_token.column)
 
     # ===== Exception Handling =====
 
@@ -618,7 +621,7 @@ class Parser:
             column=try_token.column,
             try_block=try_block,
             except_block=except_block,
-            finally_block=finally_block
+            finally_block=finally_block,
         )
 
     # ===== Expression Parsing =====
@@ -638,8 +641,8 @@ class Parser:
                 line=op_token.line,
                 column=op_token.column,
                 left=left,
-                operator='or',
-                right=right
+                operator="or",
+                right=right,
             )
 
         return left
@@ -655,8 +658,8 @@ class Parser:
                 line=op_token.line,
                 column=op_token.column,
                 left=left,
-                operator='and',
-                right=right
+                operator="and",
+                right=right,
             )
 
         return left
@@ -673,7 +676,7 @@ class Parser:
                 column=op_token.column,
                 left=left,
                 operator=op_token.value,
-                right=right
+                right=right,
             )
 
         return left
@@ -690,7 +693,7 @@ class Parser:
                 column=op_token.column,
                 left=left,
                 operator=op_token.value,
-                right=right
+                right=right,
             )
 
         return left
@@ -707,7 +710,7 @@ class Parser:
                 column=op_token.column,
                 left=left,
                 operator=op_token.value,
-                right=right
+                right=right,
             )
 
         return left
@@ -717,8 +720,10 @@ class Parser:
         left = self.parse_unary()
 
         while self.match(
-            TokenType.MULTIPLY, TokenType.DIVIDE,
-            TokenType.MODULO, TokenType.FLOOR_DIVIDE
+            TokenType.MULTIPLY,
+            TokenType.DIVIDE,
+            TokenType.MODULO,
+            TokenType.FLOOR_DIVIDE,
         ):
             op_token = self.advance()
             right = self.parse_unary()
@@ -727,7 +732,7 @@ class Parser:
                 column=op_token.column,
                 left=left,
                 operator=op_token.value,
-                right=right
+                right=right,
             )
 
         return left
@@ -744,8 +749,8 @@ class Parser:
             return UnaryOpNode(
                 line=op_token.line,
                 column=op_token.column,
-                operator=op_token.value if op_token.type == TokenType.MINUS else 'not',
-                operand=operand
+                operator=op_token.value if op_token.type == TokenType.MINUS else "not",
+                operand=operand,
             )
 
         return self.parse_power()
@@ -762,8 +767,8 @@ class Parser:
                 line=op_token.line,
                 column=op_token.column,
                 left=left,
-                operator='**',
-                right=right
+                operator="**",
+                right=right,
             )
 
         return left
@@ -778,50 +783,31 @@ class Parser:
         # Number literal
         if self.match(TokenType.NUMBER):
             token = self.advance()
-            node = NumberNode(
-                line=token.line,
-                column=token.column,
-                value=token.value
-            )
+            node = NumberNode(line=token.line, column=token.column, value=token.value)
             # Check for indexing
             return self.parse_postfix(node)
 
         # String literal
         elif self.match(TokenType.STRING):
             token = self.advance()
-            node = StringNode(
-                line=token.line,
-                column=token.column,
-                value=token.value
-            )
+            node = StringNode(line=token.line, column=token.column, value=token.value)
             return self.parse_postfix(node)
 
         # Boolean literals
         elif self.match(TokenType.TRUE):
             token = self.advance()
-            node = BooleanNode(
-                line=token.line,
-                column=token.column,
-                value=True
-            )
+            node = BooleanNode(line=token.line, column=token.column, value=True)
             return self.parse_postfix(node)
 
         elif self.match(TokenType.FALSE):
             token = self.advance()
-            node = BooleanNode(
-                line=token.line,
-                column=token.column,
-                value=False
-            )
+            node = BooleanNode(line=token.line, column=token.column, value=False)
             return self.parse_postfix(node)
 
         # None literal
         elif self.match(TokenType.NONE):
             token = self.advance()
-            node = NullNode(
-                line=token.line,
-                column=token.column
-            )
+            node = NullNode(line=token.line, column=token.column)
             return self.parse_postfix(node)
 
         # Identifier or function call
@@ -834,9 +820,7 @@ class Parser:
 
             # Otherwise, it's just an identifier
             node = IdentifierNode(
-                line=id_token.line,
-                column=id_token.column,
-                name=id_token.value
+                line=id_token.line, column=id_token.column, name=id_token.value
             )
             return self.parse_postfix(node)
 
@@ -858,7 +842,7 @@ class Parser:
         else:
             raise ParserError(
                 f"Unexpected token in expression: {self.current_token.type if self.current_token else 'None'}",
-                self.current_token
+                self.current_token,
             )
 
     def parse_postfix(self, node: ASTNode) -> ASTNode:
@@ -880,7 +864,7 @@ class Parser:
                 line=bracket_token.line,
                 column=bracket_token.column,
                 collection=node,
-                index=index
+                index=index,
             )
 
         return node
@@ -896,9 +880,7 @@ class Parser:
             FunctionCallNode
         """
         function = IdentifierNode(
-            line=id_token.line,
-            column=id_token.column,
-            name=id_token.value
+            line=id_token.line, column=id_token.column, name=id_token.value
         )
 
         self.expect(TokenType.LPAREN)
@@ -918,7 +900,7 @@ class Parser:
             line=id_token.line,
             column=id_token.column,
             function=function,
-            arguments=arguments
+            arguments=arguments,
         )
 
     def parse_list_literal(self) -> ListNode:
@@ -944,9 +926,7 @@ class Parser:
         self.expect(TokenType.RBRACKET)
 
         return ListNode(
-            line=bracket_token.line,
-            column=bracket_token.column,
-            elements=elements
+            line=bracket_token.line, column=bracket_token.column, elements=elements
         )
 
     def parse_dict_literal(self) -> DictNode:
@@ -978,11 +958,7 @@ class Parser:
 
         self.expect(TokenType.RBRACE)
 
-        return DictNode(
-            line=brace_token.line,
-            column=brace_token.column,
-            pairs=pairs
-        )
+        return DictNode(line=brace_token.line, column=brace_token.column, pairs=pairs)
 
 
 def parse(tokens: List[Token]) -> ProgramNode:
