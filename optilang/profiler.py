@@ -9,7 +9,7 @@ This module provides line-by-line profiling during code execution, collecting:
 """
 
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Tuple, Any
 from dataclasses import dataclass, field
 
 
@@ -219,7 +219,7 @@ class Profiler:
 
     def get_data(self) -> ProfilingData:
         """Get the profiling data."""
-        return self.data 
+        return self.data
 
     def reset(self) -> None:
         """Reset all profiling data."""
@@ -267,7 +267,9 @@ class Profiler:
 
 
 # Convenience function for simple use cases
-def profile_execution(executor_func, code: str, *args, **kwargs):
+def profile_execution(
+    executor_func: Callable[..., Any], code: str, *args: Any, **kwargs: Any
+) -> Tuple[Any, ProfilingData]:
     """
     Convenience wrapper to profile a code execution.
 
@@ -315,10 +317,10 @@ if __name__ == "__main__":
     print(f"Total time: {data.total_execution_time_ms:.3f}ms")
     print(f"Lines executed: {data.total_lines_executed}")
     print("\nLine stats:")
-    for line, stats in sorted(data.line_stats.items()):
+    for line, line_stats in sorted(data.line_stats.items()):
         print(
-            f"  Line {line}: {stats.execution_count} executions, "
-            f"{stats.total_time_ms:.3f}ms total"
+            f"  Line {line}: {line_stats.execution_count} executions, "
+            f"{line_stats.total_time_ms:.3f}ms total"
         )
     print("\nFunction stats:")
     for name, stats in data.function_stats.items():

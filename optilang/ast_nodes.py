@@ -101,7 +101,7 @@ class IfNode(ASTNode):
 
     condition: ASTNode
     if_block: List[ASTNode] = field(default_factory=list)
-    elif_parts: List[Tuple[ListNode, List[ASTNode]]] = field(
+    elif_parts: List[Tuple[ASTNode, List[ASTNode]]] = field(
         default_factory=list
     )  # List of (condition, block)
     else_block: Optional[List[ASTNode]] = None

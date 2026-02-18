@@ -46,9 +46,9 @@ class ParserError(OptiLangError):
     def __init__(
         self,
         message: str,
+        token: Optional[Any] = None,
         line: Optional[int] = None,
         column: Optional[int] = None,
-        token: Optional[Any] = None,
     ):
         self.token = token
 

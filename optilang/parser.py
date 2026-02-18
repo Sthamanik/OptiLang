@@ -8,13 +8,15 @@ Grammar (Simplified):
     program         → statements EOF
     statements      → statement*
     statement       → assignment | aug_assignment | if_stmt | while_stmt | for_stmt |
-                      function_def | return_stmt | break_stmt | continue_stmt | pass_stmt |
-                      try_stmt | expression_stmt
+                      function_def | return_stmt | break_stmt | continue_stmt |
+                      pass_stmt | try_stmt | expression_stmt
 
     assignment      → IDENTIFIER ASSIGN expression
-    aug_assignment  → IDENTIFIER (PLUS_ASSIGN | MINUS_ASSIGN | MULTIPLY_ASSIGN | DIVIDE_ASSIGN) expression
+    aug_assignment  → IDENTIFIER (PLUS_ASSIGN | MINUS_ASSIGN | MULTIPLY_ASSIGN |
+                      DIVIDE_ASSIGN) expression
 
-    if_stmt         → IF expression COLON block (ELIF expression COLON block)* (ELSE COLON block)?
+    if_stmt         → IF expression COLON block
+                      (ELIF expression COLON block)* (ELSE COLON block)?
     while_stmt      → WHILE expression COLON block
     for_stmt        → FOR IDENTIFIER IN expression COLON block
 
@@ -55,7 +57,7 @@ Grammar (Simplified):
     index_access    → primary LBRACKET expression RBRACKET
 """
 
-from typing import List, Optional, Union
+from typing import List, Optional
 from .token import Token, TokenType
 from .ast_nodes import (
     ASTNode,
@@ -182,7 +184,7 @@ class Parser:
             return False
         return self.current_token.type in token_types
 
-    def skip_newlines(self):
+    def skip_newlines(self) -> None:
         """Skip any newline tokens"""
         while self.match(TokenType.NEWLINE):
             self.advance()
@@ -780,6 +782,7 @@ class Parser:
         Returns:
             Primary expression node
         """
+        node: ASTNode
         # Number literal
         if self.match(TokenType.NUMBER):
             token = self.advance()
@@ -841,7 +844,8 @@ class Parser:
 
         else:
             raise ParserError(
-                f"Unexpected token in expression: {self.current_token.type if self.current_token else 'None'}",
+                f"""Unexpected token in expression:
+                    {self.current_token.type if self.current_token else 'None'}""",
                 self.current_token,
             )
 

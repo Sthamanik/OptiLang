@@ -161,6 +161,7 @@ class Executor:
         self._call_depth = 0
 
         # PROFILER: Initialize profiler
+        self.profiler: Optional[Profiler]
         if enable_profiling and profiler is None:
             self.profiler = Profiler()
         else:
@@ -193,7 +194,7 @@ class Executor:
         elapsed = time.perf_counter() - self._start_time
 
         # PROFILER: Get profiling data
-        profiling_data = self.profiler.get_data() if self.profiler else None
+        profiling_data = self.profiler.get_data().to_dict() if self.profiler else None
 
         return ExecutionResult(
             output="".join(self._output).rstrip("\n"),

@@ -2,7 +2,7 @@
 Converts source code into tokens
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 from .token import Token, TokenType
 from .utils.errors import LexerError
 
@@ -45,12 +45,12 @@ class Lexer:
 
         return char
 
-    def skip_whitespace(self):
+    def skip_whitespace(self) -> None:
         """Skip spaces and tabs (but not newlines)"""
         while self.current_char() in (" ", "\t"):
             self.advance()
 
-    def skip_comment(self):
+    def skip_comment(self) -> None:
         """Skip single-line comments starting with #"""
         char = self.current_char()
         if char == "#":
@@ -146,6 +146,7 @@ class Lexer:
         token_type = TokenType.KEYWORDS.get(identifier, TokenType.IDENTIFIER)
 
         # For boolean and None literals, convert to actual values
+        value: Any
         if token_type == TokenType.TRUE:
             value = True
         elif token_type == TokenType.FALSE:
