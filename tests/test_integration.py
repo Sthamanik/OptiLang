@@ -8,6 +8,7 @@ Note: result.profiling is a plain dict (from ProfilingData.to_dict()),
       NOT a ProfilingData object. Access it with string keys.
 """
 
+import textwrap
 import time
 from optilang import execute
 from optilang.models import ExecutionResult
@@ -42,22 +43,25 @@ def test_loop_program():
 
 
 def test_nested_loops():
-    src = """total = 0
-             for i in range(3):
-                for j in range(3):
-                    total += 1\nprint(total)"""
+    src = textwrap.dedent("""\
+        total = 0
+        for i in range(3):
+            for j in range(3):
+                total += 1
+        print(total)""")
     result = execute(src)
     assert result.output == "9"
     assert result.errors == []
 
 
 def test_try_except_program():
-    src = """try:
-                x = 1 / 0
-            except:
-                print('handled')
-            finally:
-                print('done')"""
+    src = textwrap.dedent("""\
+        try:
+            x = 1 / 0
+        except:
+            print('handled')
+        finally:
+            print('done')""")
     result = execute(src)
     assert result.output == "handled\ndone"
     assert result.errors == []
@@ -208,10 +212,12 @@ print(fib(8))
 
 def test_benchmark_nested_loops():
     """Supervisor: nested loops execution count validation."""
-    src = """total = 0
-             for i in range(10):
-                for j in range(10):
-                    total += 1\nprint(total)"""
+    src = textwrap.dedent("""\
+        total = 0
+        for i in range(10):
+            for j in range(10):
+                total += 1
+        print(total)""")
     result = execute(src)
     assert result.output == "100"
     all_counts = [s["count"] for s in result.profiling["line_stats"].values()]
