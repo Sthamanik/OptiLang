@@ -565,7 +565,7 @@ class Parser:
 
         # Check if there's a return value
         value = None
-        if not self.match(TokenType.NEWLINE, TokenType.EOF):
+        if not self.match(TokenType.NEWLINE, TokenType.EOF, TokenType.DEDENT):
             value = self.parse_expression()
 
         return ReturnNode(

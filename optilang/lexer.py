@@ -178,6 +178,10 @@ class Lexer:
             self.advance()
             char = self.current_char()
 
+        # If line is blank or EOF, ignore indentation entirely
+        if char in ("\n", "\r", None):
+            return []
+
         # Normalize to indent units (4 spaces = 1 indent)
         indent_units = indent_level // 4
 
