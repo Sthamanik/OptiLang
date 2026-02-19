@@ -4,7 +4,7 @@ Tests for optilang/profiler.py
 
 import time
 import pytest
-from optilang.profiler import Profiler, LineStats, FunctionStats, ProfilingData
+from optilang.profiler import Profiler, LineStats, FunctionStats
 
 
 def make_profiler():

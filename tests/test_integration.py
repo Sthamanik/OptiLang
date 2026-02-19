@@ -9,7 +9,6 @@ Note: result.profiling is a plain dict (from ProfilingData.to_dict()),
 """
 
 import time
-import pytest
 from optilang import execute
 from optilang.models import ExecutionResult
 
@@ -43,14 +42,22 @@ def test_loop_program():
 
 
 def test_nested_loops():
-    src = "total = 0\nfor i in range(3):\n    for j in range(3):\n        total += 1\nprint(total)"
+    src = """total = 0
+             for i in range(3):
+                for j in range(3):
+                    total += 1\nprint(total)"""
     result = execute(src)
     assert result.output == "9"
     assert result.errors == []
 
 
 def test_try_except_program():
-    src = "try:\n    x = 1 / 0\nexcept:\n    print('handled')\nfinally:\n    print('done')"
+    src = """try:
+                x = 1 / 0
+            except:
+                print('handled')
+            finally:
+                print('done')"""
     result = execute(src)
     assert result.output == "handled\ndone"
     assert result.errors == []
@@ -201,7 +208,10 @@ print(fib(8))
 
 def test_benchmark_nested_loops():
     """Supervisor: nested loops execution count validation."""
-    src = "total = 0\nfor i in range(10):\n    for j in range(10):\n        total += 1\nprint(total)"
+    src = """total = 0
+             for i in range(10):
+                for j in range(10):
+                    total += 1\nprint(total)"""
     result = execute(src)
     assert result.output == "100"
     all_counts = [s["count"] for s in result.profiling["line_stats"].values()]
