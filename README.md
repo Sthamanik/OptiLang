@@ -161,8 +161,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 👥 Team
 
 - **Manik Kumar Shrestha** - [GitHub](https://github.com/Sthamanik)
-- **Om Shree Mahat** - *Developer*
-- **Aashish Rimal** - *Developer*
+- **Om Shree Mahat** - [GitHub](https://github.com/itsomshree)
+- **Aashish Rimal** - [GitHub](https://github.com/aashishrimal22)
 
 ---
 

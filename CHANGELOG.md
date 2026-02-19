@@ -12,12 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic data models
 - Test framework setup
 
-## [0.1.0] - 2025-02-XX
+## [0.1.0] - 2025-02-19
 
 ### Added
 - Project initialization
 - Repository setup
 - Development environment configuration
 
-[Unreleased]: https://github.com/YOUR_USERNAME/optilang/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/YOUR_USERNAME/optilang/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Sthamanik/optilang/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Sthamanik/optilang/releases/tag/v0.1.0

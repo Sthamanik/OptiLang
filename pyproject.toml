@@ -7,7 +7,7 @@ name = "optilang"
 version = "0.1.0"
 description = "A Python-inspired interpreter with real-time code analysis and optimization suggestions"
 readme = "README.md"
-requires-python = ">=3.14.2"
+requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Manik Kumar Shrestha", email = "shresthamanik1820@gmail.com"}
