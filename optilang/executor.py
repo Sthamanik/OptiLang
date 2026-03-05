@@ -1,7 +1,6 @@
 """
 Runtime executor for OptiLang AST programs.
 """
-
 from __future__ import annotations
 
 import time
@@ -37,7 +36,7 @@ from .ast_nodes import (
 from .lexer import tokenize
 from .models import ExecutionResult
 from .parser import parse
-from .profiler import Profiler  # NEW IMPORT
+from .profiler import Profiler, ProfilingData
 from .utils.errors import (
     ArgumentError,
     IndexError as OptiIndexError,
@@ -46,7 +45,7 @@ from .utils.errors import (
     ParserError,
     RecursionError as OptiRecursionError,
     RuntimeError as OptiRuntimeError,
-    TimeoutError,
+    TimeoutError as OptiTimeoutError,
     TypeError as OptiTypeError,
     ValueError as OptiValueError,
     ZeroDivisionError as OptiZeroDivisionError,
@@ -55,29 +54,44 @@ from .utils.errors import LexerError
 
 
 class _BreakSignal(Exception):
-    pass
+    """Internal signal raised by a break statement."""
 
 
 class _ContinueSignal(Exception):
-    pass
+    """Internal signal raised by a continue statement."""
 
 
 @dataclass
 class _ReturnSignal(Exception):
+    """Internal signal raised by a return statement, carrying its value."""
+
     value: Any
 
 
 class Environment:
-    """Hierarchical variable scope."""
+    """Hierarchical variable scope chain."""
 
-    def __init__(self, parent: Optional["Environment"] = None):
+    def __init__(self, parent: Optional["Environment"] = None) -> None:
+        """
+        Initialise a new scope.
+
+        Args:
+            parent: The enclosing scope, or None for the global scope.
+        """
         self.parent = parent
         self.values: Dict[str, Any] = {}
 
     def define(self, name: str, value: Any) -> None:
+        """Bind a new name in the current scope."""
         self.values[name] = value
 
     def get(self, name: str, node: Optional[ASTNode] = None) -> Any:
+        """
+        Look up a name, searching parent scopes if necessary.
+
+        Raises:
+            OptiNameError: If the name is not found in any scope.
+        """
         if name in self.values:
             return self.values[name]
         if self.parent is not None:
@@ -85,6 +99,10 @@ class Environment:
         raise OptiNameError(name, getattr(node, "line", None))
 
     def assign(self, name: str, value: Any) -> None:
+        """
+        Assign to an existing name (nearest scope that owns it),
+        or create it in the current scope if it does not exist anywhere.
+        """
         if name in self.values:
             self.values[name] = value
             return
@@ -94,30 +112,66 @@ class Environment:
         self.values[name] = value
 
     def contains(self, name: str) -> bool:
+        """Return True if *name* exists anywhere in this scope chain."""
         if name in self.values:
             return True
         if self.parent is None:
             return False
         return self.parent.contains(name)
 
+    def all_values(self) -> Dict[str, Any]:
+        """
+        Return every variable visible from this scope (including parents).
+
+        Used by the profiler for memory estimation.
+        """
+        result: Dict[str, Any] = {}
+        if self.parent is not None:
+            result.update(self.parent.all_values())
+        result.update(self.values)
+        return result
+
 
 class UserFunction:
     """Callable wrapper for user-defined function nodes."""
 
-    def __init__(self, node: FunctionDefNode, closure: Environment):
+    def __init__(self, node: FunctionDefNode, closure: Environment) -> None:
+        """
+        Wrap a function definition node with its enclosing scope.
+
+        Args:
+            node:    The FunctionDefNode from the AST.
+            closure: The environment in which the function was defined.
+        """
         self.node = node
         self.closure = closure
 
     @property
     def name(self) -> str:
+        """The function's declared name."""
         return self.node.name.name
 
     def call(self, executor: "Executor", args: List[Any]) -> Any:
+        """
+        Execute this function with the given arguments.
+
+        Args:
+            executor: The active Executor instance.
+            args:     Evaluated argument values.
+
+        Returns:
+            The function's return value, or None.
+
+        Raises:
+            ArgumentError:      Wrong number of arguments.
+            OptiRecursionError: Recursion limit exceeded.
+        """
         expected = len(self.node.parameters)
         got = len(args)
         if expected != got:
             raise ArgumentError(self.name, expected, got, self.node.line)
 
+        # pylint: disable=protected-access
         executor._call_depth += 1
         if executor._call_depth > executor.max_recursion_depth:
             executor._call_depth -= 1
@@ -127,84 +181,100 @@ class UserFunction:
         for param, arg in zip(self.node.parameters, args):
             frame.define(param.name, arg)
 
-        # PROFILER: Start tracking function call
-        if executor.profiler:
+        if executor.profiler is not None:
             executor.profiler.start_function_call(self.name)
 
         try:
+            # pylint: disable=protected-access
             executor._execute_block(self.node.body, frame)
             return None
         except _ReturnSignal as signal:
             return signal.value
         finally:
-            # PROFILER: End tracking function call
-            if executor.profiler:
+            if executor.profiler is not None:
                 executor.profiler.end_function_call(self.name)
             executor._call_depth -= 1
 
 
 class Executor:
-    """
-    AST executor for OptiLang programs.
-    """
+    """AST tree-walking executor for OptiLang programs."""
 
     def __init__(
         self,
         timeout_seconds: float = 5.0,
-        profiler: Optional[Profiler] = None,  # NEW PARAMETER
-        enable_profiling: bool = True,  # NEW PARAMETER
-    ):
+        profiler: Optional[Profiler] = None,
+        enable_profiling: bool = True,
+    ) -> None:
+        """
+        Initialise the executor.
+
+        Args:
+            timeout_seconds:  Maximum execution time before TimeoutError.
+                              Set <= 0 to disable.
+            profiler:         Existing Profiler instance to use. If None
+                              and enable_profiling is True, one is created.
+            enable_profiling: Whether to collect profiling data.
+        """
         self.timeout_seconds = timeout_seconds
         self._start_time = 0.0
         self._output: List[str] = []
         self.max_recursion_depth = 1000
         self._call_depth = 0
 
-        # PROFILER: Initialize profiler
-        self.profiler: Optional[Profiler]
-        if enable_profiling and profiler is None:
-            self.profiler = Profiler()
+        if enable_profiling:
+            self.profiler: Optional[Profiler] = (
+                profiler if profiler is not None else Profiler()
+            )
         else:
-            self.profiler = profiler
+            self.profiler = None
 
         self.globals = Environment()
         self._install_builtins()
         self._builtin_names = set(self.globals.values.keys())
 
     def run(self, program: ProgramNode) -> ExecutionResult:
+        """
+        Execute a parsed program and return its result.
+
+        Args:
+            program: The root ProgramNode from the parser.
+
+        Returns:
+            ExecutionResult with output, errors, timing, profiling data,
+            and the final symbol table.
+        """
         self._start_time = time.perf_counter()
         self._output = []
         errors: List[str] = []
 
-        # PROFILER: Start profiling session
-        if self.profiler:
+        if self.profiler is not None:
             self.profiler.start()
 
         try:
             self._execute_program(program)
         except OptiRuntimeError as exc:
             errors.append(str(exc))
-        except Exception as exc:  # pragma: no cover - unexpected fallback
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             errors.append(f"Runtime error: {exc}")
         finally:
-            # PROFILER: Stop profiling session
-            if self.profiler:
+            if self.profiler is not None:
                 self.profiler.stop()
 
         elapsed = time.perf_counter() - self._start_time
-
-        # PROFILER: Get profiling data
-        profiling_data = self.profiler.get_data().to_dict() if self.profiler else None
+        profiling_data: Optional[ProfilingData] = (
+            self.profiler.get_data() if self.profiler is not None else None
+        )
 
         return ExecutionResult(
             output="".join(self._output).rstrip("\n"),
             errors=errors,
             execution_time=elapsed,
-            profiling=profiling_data,  # Include profiling data
+            profiling=profiling_data,
             symbol_table=self.get_symbol_table(include_builtins=False),
         )
 
     def _install_builtins(self) -> None:
+        """Register built-in functions and types into the global scope."""
         self.globals.define("print", self._builtin_print)
         self.globals.define("range", range)
         self.globals.define("len", len)
@@ -216,42 +286,49 @@ class Executor:
         self.globals.define("dict", dict)
 
     def _builtin_print(self, *args: Any) -> None:
+        """Implementation of the built-in print() function."""
         self._output.append(" ".join(str(arg) for arg in args) + "\n")
-        return None
 
     def _check_timeout(self, node: Optional[ASTNode] = None) -> None:
+        """Raise OptiTimeoutError if the execution time limit is exceeded."""
         if self.timeout_seconds <= 0:
             return
         elapsed = time.perf_counter() - self._start_time
         if elapsed > self.timeout_seconds:
-            raise TimeoutError(self.timeout_seconds, getattr(node, "line", None))
+            raise OptiTimeoutError(
+                self.timeout_seconds, getattr(node, "line", None)
+            )
 
     def _execute_program(self, program: ProgramNode) -> None:
+        """Execute the top-level list of statements."""
         self._execute_block(program.statements, self.globals)
 
-    def _execute_block(self, statements: List[ASTNode], env: Environment) -> None:
+    def _execute_block(
+        self, statements: List[ASTNode], env: Environment
+    ) -> None:
+        """Execute a list of statements sequentially in the given scope."""
         for statement in statements:
             self._check_timeout(statement)
             self._execute_statement(statement, env)
 
     def _execute_statement(self, node: ASTNode, env: Environment) -> None:
-        # PROFILER: Start profiling this line
+        """Wrap a single statement with profiler hooks, then execute it."""
         line_num = getattr(node, "line", 0)
-        var_count = self._count_variables(env)
 
-        if self.profiler:
-            self.profiler.start_line(line_num, var_count)
+        if self.profiler is not None:
+            # Pass the full env dict so profiler can estimate memory usage
+            self.profiler.start_line(line_num, env.all_values())
 
         try:
-            # Execute the statement
             self._execute_statement_impl(node, env)
         finally:
-            # PROFILER: End profiling this line
-            if self.profiler:
+            if self.profiler is not None:
                 self.profiler.end_line(line_num)
 
-    def _execute_statement_impl(self, node: ASTNode, env: Environment) -> None:
-        """Actual statement execution logic (separated for profiling)."""
+    def _execute_statement_impl(
+        self, node: ASTNode, env: Environment
+    ) -> None:
+        """Dispatch and execute a single statement node."""
         if isinstance(node, AssignmentNode):
             env.assign(node.target.name, self._eval(node.value, env))
             return
@@ -291,8 +368,10 @@ class Executor:
             iterable = self._eval(node.iterable, env)
             try:
                 iterator = iter(iterable)
-            except Exception as exc:
-                raise OptiTypeError(f"Object is not iterable: {exc}", node.line)
+            except TypeError as exc:
+                raise OptiTypeError(
+                    f"Object is not iterable: {exc}", node.line
+                ) from exc
 
             for value in iterator:
                 self._check_timeout(node)
@@ -310,7 +389,9 @@ class Executor:
             return
 
         if isinstance(node, ReturnNode):
-            value = self._eval(node.value, env) if node.value is not None else None
+            value = (
+                self._eval(node.value, env) if node.value is not None else None
+            )
             raise _ReturnSignal(value)
 
         if isinstance(node, BreakNode):
@@ -334,10 +415,20 @@ class Executor:
                     self._execute_block(node.finally_block, env)
             return
 
-        # Expression statement
+        # Expression statement (e.g. a bare function call)
         self._eval(node, env)
 
     def _eval(self, node: ASTNode, env: Environment) -> Any:
+        """
+        Evaluate an expression node and return its value.
+
+        Args:
+            node: Any expression ASTNode.
+            env:  The current scope.
+
+        Returns:
+            The Python value the expression evaluates to.
+        """
         self._check_timeout(node)
 
         if isinstance(node, NumberNode):
@@ -350,7 +441,6 @@ class Executor:
             return None
         if isinstance(node, IdentifierNode):
             return env.get(node.name, node)
-
         if isinstance(node, BinaryOpNode):
             return self._eval_binary(node, env)
 
@@ -359,8 +449,10 @@ class Executor:
             if node.operator == "-":
                 try:
                     return -operand
-                except Exception as exc:
-                    raise OptiTypeError(f"Invalid unary '-': {exc}", node.line)
+                except TypeError as exc:
+                    raise OptiTypeError(
+                        f"Invalid unary '-': {exc}", node.line
+                    ) from exc
             if node.operator == "not":
                 return not self._truthy(operand)
             raise OptiRuntimeError(
@@ -382,8 +474,10 @@ class Executor:
                 value = self._eval(value_node, env)
                 try:
                     result[key] = value
-                except Exception as exc:
-                    raise OptiTypeError(f"Unhashable dictionary key: {exc}", node.line)
+                except TypeError as exc:
+                    raise OptiTypeError(
+                        f"Unhashable dictionary key: {exc}", node.line
+                    ) from exc
             return result
 
         if isinstance(node, IndexNode):
@@ -396,18 +490,19 @@ class Executor:
         )
 
     def _eval_binary(self, node: BinaryOpNode, env: Environment) -> Any:
+        """
+        Evaluate a binary operation node.
+
+        Short-circuits for 'and' / 'or'; evaluates both sides otherwise.
+        """
         op = node.operator
 
         if op == "and":
             left = self._eval(node.left, env)
-            if not self._truthy(left):
-                return left
-            return self._eval(node.right, env)
+            return left if not self._truthy(left) else self._eval(node.right, env)
         if op == "or":
             left = self._eval(node.left, env)
-            if self._truthy(left):
-                return left
-            return self._eval(node.right, env)
+            return left if self._truthy(left) else self._eval(node.right, env)
 
         left = self._eval(node.left, env)
         right = self._eval(node.right, env)
@@ -445,16 +540,23 @@ class Executor:
                 return left > right
             if op == ">=":
                 return left >= right
-        except OptiRuntimeError:
+        except OptiRuntimeError:  # pylint: disable=try-except-raise
             raise
-        except Exception as exc:
-            raise OptiTypeError(f"Invalid operation '{op}': {exc}", node.line)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise OptiTypeError(
+                f"Invalid operation '{op}': {exc}", node.line
+            ) from exc
 
         raise OptiRuntimeError(f"Unsupported binary operator: {op}", node.line)
 
     def _apply_augmented(
-        self, operator: str, current: Any, value: Any, node: AugmentedAssignmentNode
+        self,
+        operator: str,
+        current: Any,
+        value: Any,
+        node: AugmentedAssignmentNode,
     ) -> Any:
+        """Apply an augmented assignment operator (+=, -=, *=, /=)."""
         if operator == "+=":
             return current + value
         if operator == "-=":
@@ -465,21 +567,29 @@ class Executor:
             if value == 0:
                 raise OptiZeroDivisionError(node.line)
             return current / value
-        raise OptiRuntimeError(f"Unsupported augmented operator: {operator}", node.line)
+        raise OptiRuntimeError(
+            f"Unsupported augmented operator: {operator}", node.line
+        )
 
-    def _call(self, callee: Any, args: List[Any], node: FunctionCallNode) -> Any:
+    def _call(
+        self, callee: Any, args: List[Any], node: FunctionCallNode
+    ) -> Any:
+        """Invoke a callable (user function or built-in)."""
         if isinstance(callee, UserFunction):
             return callee.call(self, args)
         if callable(callee):
             try:
                 return callee(*args)
             except TypeError as exc:
-                raise OptiTypeError(f"Invalid function call: {exc}", node.line)
+                raise OptiTypeError(
+                    f"Invalid function call: {exc}", node.line
+                ) from exc
             except ValueError as exc:
-                raise OptiValueError(str(exc), node.line)
+                raise OptiValueError(str(exc), node.line) from exc
         raise OptiTypeError("Object is not callable", node.line)
 
     def _index(self, collection: Any, index: Any, node: IndexNode) -> Any:
+        """Perform an index/key lookup on a collection."""
         if isinstance(collection, (list, str, tuple)):
             if not isinstance(index, int):
                 raise OptiTypeError(
@@ -490,37 +600,40 @@ class Executor:
                 )
             try:
                 return collection[index]
-            except Exception:
-                raise OptiIndexError(index, len(collection), node.line)
+            except IndexError as exc:
+                raise OptiIndexError(index, len(collection), node.line) from exc
 
         if isinstance(collection, dict):
             try:
                 return collection[index]
-            except Exception:
-                raise OptiKeyError(index, node.line)
+            except KeyError as exc:
+                raise OptiKeyError(index, node.line) from exc
 
         raise OptiTypeError("Object is not indexable", node.line)
 
-    def _count_variables(self, env: Environment) -> int:
-        """Count total variables in scope chain for memory profiling."""
-        count = len(env.values)
-        if env.parent is not None:
-            count += self._count_variables(env.parent)
-        return count
-
     @staticmethod
     def _truthy(value: Any) -> bool:
+        """Return the boolean truth value of *value*."""
         return bool(value)
 
     def _serialize_symbol_value(self, value: Any) -> Any:
+        """Convert a runtime value to a JSON-friendly representation."""
         if isinstance(value, UserFunction):
             return f"<function {value.name}>"
         if callable(value):
-            name = getattr(value, "__name__", type(value).__name__)
-            return f"<builtin {name}>"
+            fn_name = getattr(value, "__name__", type(value).__name__)
+            return f"<builtin {fn_name}>"
         return value
 
-    def get_symbol_table(self, include_builtins: bool = False) -> Dict[str, Any]:
+    def get_symbol_table(
+        self, include_builtins: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Return the global symbol table as a serializable dictionary.
+
+        Args:
+            include_builtins: If False (default), built-in names are excluded.
+        """
         table: Dict[str, Any] = {}
         for name, value in self.globals.values.items():
             if not include_builtins and name in self._builtin_names:
@@ -532,18 +645,20 @@ class Executor:
 def execute(
     source: str,
     timeout_seconds: float = 5.0,
-    enable_profiling: bool = True,  # NEW PARAMETER
+    enable_profiling: bool = True,
 ) -> ExecutionResult:
     """
     Parse and execute OptiLang source code.
 
     Args:
-        source: OptiLang source code
-        timeout_seconds: Maximum execution time
-        enable_profiling: Whether to collect profiling data (default: True)
+        source:           PyLite source code string.
+        timeout_seconds:  Maximum allowed execution time in seconds.
+                          Set <= 0 to disable the timeout.
+        enable_profiling: Whether to collect profiling data. Defaults to True.
 
     Returns:
-        ExecutionResult with output, errors, execution time, and profiling data
+        ExecutionResult containing output, errors, execution time,
+        profiling data, and the final symbol table.
     """
     start = time.perf_counter()
 
@@ -551,7 +666,8 @@ def execute(
         tokens = tokenize(source)
         program = parse(tokens)
         return Executor(
-            timeout_seconds=timeout_seconds, enable_profiling=enable_profiling
+            timeout_seconds=timeout_seconds,
+            enable_profiling=enable_profiling,
         ).run(program)
     except (LexerError, ParserError, OptiRuntimeError) as exc:
         elapsed = time.perf_counter() - start
