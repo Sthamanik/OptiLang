@@ -4,6 +4,7 @@ Data models for OptiLang.
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+from .profiler import ProfilingData
 
 
 @dataclass
@@ -13,7 +14,7 @@ class ExecutionResult:
     output: str
     errors: List[str] = field(default_factory=list)
     execution_time: float = 0.0
-    profiling: Optional[Dict[str, Any]] = None
+    profiling: Optional[ProfilingData] = None
     symbol_table: Dict[str, Any] = field(default_factory=dict)
 
 
