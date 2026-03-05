@@ -3,10 +3,26 @@ OptiLang - A Python-inspired interpreter with real-time code analysis
 and optimization suggestions.
 """
 
-# optilang/__init__.py
-from optilang.executor import execute
-from optilang.parser import parse
-from optilang.scoring import calculate_score, ScoreReport
+from __future__ import annotations
 
-__version__ = "0.2.0"
-__all__ = ["execute", "parse", "calculate_score", 'ScoreReport']
+from .executor import Executor, execute
+from .models import ExecutionResult, OptimizationReport, Suggestion
+from .parser import parse
+from .scoring import Scorer, ScoreReport, calculate_score
+
+__version__ = "0.3.0"
+
+__all__ = [
+    # Core functions
+    "execute",
+    "parse",
+    "calculate_score",
+    # Classes
+    "Executor",
+    "Scorer",
+    # Result models (useful for type hints)
+    "ExecutionResult",
+    "OptimizationReport",
+    "Suggestion",
+    "ScoreReport",
+]
