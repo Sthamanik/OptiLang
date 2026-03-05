@@ -42,8 +42,6 @@ class BooleanNode(ASTNode):
 class NullNode(ASTNode):
     """Represents a null or None literal"""
 
-    pass
-
 
 # Identifiers
 @dataclass
@@ -128,21 +126,15 @@ class ForNode(ASTNode):
 class BreakNode(ASTNode):
     """Represents a break statement"""
 
-    pass
-
 
 @dataclass
 class ContinueNode(ASTNode):
     """Represents continue statement"""
 
-    pass
-
 
 @dataclass
 class PassNode(ASTNode):
     """Represents pass statement"""
-
-    pass
 
 
 # Functions
