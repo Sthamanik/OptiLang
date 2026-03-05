@@ -20,7 +20,7 @@ __all__ = [
     # Classes
     "Executor",
     "Scorer",
-    # Result models (useful for type hints)
+    # Result models (useful for type hint)
     "ExecutionResult",
     "OptimizationReport",
     "Suggestion",
