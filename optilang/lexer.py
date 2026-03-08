@@ -1,376 +1,298 @@
 """
-Converts source code into tokens
+DFA-Based Lexer for PyLite (OptiLang)
+
+Implements a Deterministic Finite Automaton (DFA) for tokenizing PyLite source code.
+
+Theory:
+    A DFA is a 5-tuple M = (Q, Σ, δ, q0, F) where:
+        Q  = finite set of states (LexerState enum)
+        Σ  = input alphabet (ASCII characters)
+        δ  = transition function (transition() method)
+        q0 = start state (LexerState.START)
+        F  = set of accepting states (states that emit tokens)
+
+    Each character consumed drives a state transition.
+    When an accepting state is reached, a token is emitted
+    and the DFA resets to START.
+
+State Diagram (simplified):
+    START ──digit──────────→ IN_NUMBER ──digit──→ (loop)
+          ──alpha/_─────────→ IN_IDENTIFIER
+          ──"──────────────→ IN_STRING_DOUBLE
+          ──'──────────────→ IN_STRING_SINGLE
+          ──#──────────────→ IN_COMMENT
+          ──=──────────────→ SAW_EQ ──=──→ emit EQ
+                                    ──*──→ emit ASSIGN
+          ──<──────────────→ SAW_LT ──=──→ emit LE
+          ──>──────────────→ SAW_GT ──=──→ emit GE
+          ──!──────────────→ SAW_BANG ──=──→ emit NE
+          ──+──────────────→ SAW_PLUS ──=──→ emit PLUS_ASSIGN
+          ──-──────────────→ SAW_MINUS ──=──→ emit MINUS_ASSIGN
+          ──*──────────────→ SAW_STAR ──*──→ emit POWER
+                                      ──=──→ emit MULTIPLY_ASSIGN
+          ──/──────────────→ SAW_SLASH ──/──→ emit FLOOR_DIVIDE
+                                       ──=──→ emit DIVIDE_ASSIGN
+          ──single_char────→ emit single-char token
 """
 
+from __future__ import annotations
+from enum import Enum, auto
 from typing import List, Optional, Any
-from .token import Token, TokenType
+from .token import Token, TokenType, KEYWORDS
 from .utils.errors import LexerError
+
+# ─────────────────────────────────────────────
+#  DFA States
+# ─────────────────────────────────────────────
+
+
+class LexerState(Enum):
+    """
+    Explicit DFA states for the PyLite lexer.
+
+    Each state represents where the automaton currently is
+    during its scan of the input string.
+    """
+
+    # ── Entry point ──────────────────────────
+    START = auto()  # q0: initial / reset state
+
+    # ── Numeric literals ─────────────────────
+    IN_NUMBER = auto()  # reading integer digits
+    IN_FLOAT = auto()  # reading digits after decimal point
+
+    # ── Identifiers & keywords ───────────────
+    IN_IDENTIFIER = auto()  # reading alphanumeric / underscore chars
+
+    # ── String literals ──────────────────────
+    IN_STRING_DOUBLE = auto()  # inside "..." string
+    IN_STRING_SINGLE = auto()  # inside '...' string
+    IN_STRING_ESCAPE = auto()  # just saw backslash inside a string
+
+    # ── Comments ─────────────────────────────
+    IN_COMMENT = auto()  # inside # ... comment, skip to EOL
+
+    # ── Newline / indentation ────────────────
+    IN_NEWLINE = auto()  # processing \n, will check indentation next
+
+    # ── Two-character operator lookahead ─────
+    # Each state means "I saw the first character; peeking at next"
+    SAW_EQ = auto()  # '='  → could be '==' or '='
+    SAW_LT = auto()  # '<'  → could be '<=' or '<'
+    SAW_GT = auto()  # '>'  → could be '>=' or '>'
+    SAW_BANG = auto()  # '!'  → must be '!=' (else error)
+    SAW_PLUS = auto()  # '+'  → could be '+=' or '+'
+    SAW_MINUS = auto()  # '-'  → could be '-=' or '-'
+    SAW_STAR = auto()  # '*'  → could be '**', '*=', or '*'
+    SAW_SLASH = auto()  # '/'  → could be '//', '/=', or '/'
+
+    # ── Indentation handling ─────────────────
+    IN_INDENT = auto()  # counting spaces/tabs at line start
+
+    # ── Terminal states ──────────────────────
+    DONE = auto()  # accepted: token emitted, reset to START
+    ERROR = auto()  # rejected: raise LexerError
+
+
+# ─────────────────────────────────────────────
+#  Lexer
+# ─────────────────────────────────────────────
 
 
 class Lexer:
+    """
+    DFA-based lexer for PyLite source code.
+
+    Drives the automaton character-by-character through
+    transition() until EOF, collecting tokens.
+    """
+
     def __init__(self, source: str):
         self.source = source
-        self.pos = 0  # Current position in source
-        self.line = 1  # Current line number
-        self.column = 1  # Current column number
+        self.pos = 0
+        self.line = 1
+        self.column = 1
         self.tokens: List[Token] = []
-        self.indent_stack = [0]  # Stack to track indentation levels
+        self.indent_stack = [0]  # tracks open indentation levels
 
-    def current_char(self) -> Optional[str]:
-        """Get the current character without advancing"""
+        # ── per-token working state ──────────
+        self._state = LexerState.START
+        self._buffer = ""  # characters accumulated for current token
+        self._tok_line = 1  # line where current token started
+        self._tok_col = 1  # column where current token started
+        self._string_quote = ""  # which quote char opened current string
+        self._string_escape_state: Optional[LexerState] = (
+            None  # state to return to after escape
+        )
+
+    # ─────────────────────────────────────────
+    #  Low-level character access
+    # ─────────────────────────────────────────
+
+    def _current(self) -> Optional[str]:
+        """Return the character at the current position, or None at EOF."""
         if self.pos >= len(self.source):
             return None
         return self.source[self.pos]
 
-    def peek_char(self, offset: int = 1) -> Optional[str]:
-        """Peek at a character ahead without advancing"""
-        peek_pos = self.pos + offset
-        if peek_pos >= len(self.source):
-            return None
-        return self.source[peek_pos]
-
-    def advance(self) -> Optional[str]:
-        """Move to the next character and return it"""
+    def _advance(self) -> Optional[str]:
+        """Consume and return the current character, updating line/column."""
         if self.pos >= len(self.source):
             return None
-
-        char = self.source[self.pos]
+        ch = self.source[self.pos]
         self.pos += 1
-
-        if char == "\n":
+        if ch == "\n":
             self.line += 1
             self.column = 1
         else:
             self.column += 1
+        return ch
 
-        return char
+    # ─────────────────────────────────────────
+    #  Token emission helpers
+    # ─────────────────────────────────────────
 
-    def skip_whitespace(self) -> None:
-        """Skip spaces and tabs (but not newlines)"""
-        while self.current_char() in (" ", "\t"):
-            self.advance()
+    def _emit(self, token_type: TokenType, value: Any) -> Token:
+        """Create a token and append it to the output list."""
+        tok = Token(token_type, value, self._tok_line, self._tok_col)
+        self.tokens.append(tok)
+        return tok
 
-    def skip_comment(self) -> None:
-        """Skip single-line comments starting with #"""
-        char = self.current_char()
-        if char == "#":
-            while True:
-                char = self.current_char()
-                if not char or char == "\n":
-                    break
-                self.advance()
+    def _reset(self) -> None:
+        """Reset working state after emitting a token."""
+        self._buffer = ""
+        self._state = LexerState.START
 
-    def read_number(self) -> Token:
-        """Read a number token (integer or float)"""
-        start_line = self.line
-        start_column = self.column
-        num_str = ""
-        has_dot = False
+    def _mark_start(self) -> None:
+        """Record the start position of the next token."""
+        self._tok_line = self.line
+        self._tok_col = self.column
 
-        char = self.current_char()
-        while char and (char.isdigit() or char == "."):
-            if char == ".":
-                if has_dot:
-                    raise LexerError(
-                        "Invalid number format: multiple decimal points",
-                        start_line,
-                        start_column,
-                    )
-                has_dot = True
-            num_str += char
-            self.advance()
-            char = self.current_char()
+    # ─────────────────────────────────────────
+    #  Indentation helpers
+    # ─────────────────────────────────────────
 
-        # Check if number ends with a dot
-        if num_str.endswith("."):
-            raise LexerError(
-                "Invalid number format: ends with decimal point",
-                start_line,
-                start_column,
-            )
-
-        value = float(num_str) if has_dot else int(num_str)
-        return Token(TokenType.NUMBER, value, start_line, start_column)
-
-    def read_string(self, quote: str) -> Token:
-        """Read a string token (single or double quoted)"""
-        start_line = self.line
-        start_column = self.column
-
-        self.advance()  # Skip opening quote
-        string_value = ""
-
-        char = self.current_char()
-        while char and char != quote:
-            if char == "\\":
-                self.advance()
-                # Handle escape sequences
-                escape_char = self.current_char()
-                if escape_char == "n":
-                    string_value += "\n"
-                elif escape_char == "t":
-                    string_value += "\t"
-                elif escape_char == "r":
-                    string_value += "\r"
-                elif escape_char == "\\":
-                    string_value += "\\"
-                elif escape_char == quote:
-                    string_value += quote
-                elif escape_char:
-                    string_value += escape_char
-                self.advance()
-            else:
-                string_value += char
-                self.advance()
-            char = self.current_char()
-
-        if not char:
-            raise LexerError("Unterminated string", start_line, start_column)
-
-        self.advance()  # Skip closing quote
-        return Token(TokenType.STRING, string_value, start_line, start_column)
-
-    def read_identifier(self) -> Token:
-        """Read an identifier or keyword token"""
-        start_line = self.line
-        start_column = self.column
-        identifier = ""
-
-        char = self.current_char()
-        while char and (char.isalnum() or char == "_"):
-            identifier += char
-            self.advance()
-            char = self.current_char()
-
-        # Check if it's a keyword
-        token_type = TokenType.KEYWORDS.get(identifier, TokenType.IDENTIFIER)
-
-        # For boolean and None literals, convert to actual values
-        value: Any
-        if token_type == TokenType.TRUE:
-            value = True
-        elif token_type == TokenType.FALSE:
-            value = False
-        elif token_type == TokenType.NONE:
-            value = None
-        else:
-            value = identifier
-
-        return Token(token_type, value, start_line, start_column)
-
-    def handle_indentation(self, line_start: bool) -> List[Token]:
+    def _handle_indent(self, indent_level: int) -> None:
         """
-        Handle indentation at the start of a line
+        Compare indent_level against the indent stack and emit
+        INDENT / DEDENT tokens as needed.
+
+        This is called once per non-blank, non-comment line.
         """
-        if not line_start:
-            return []
-
-        indent_level = 0
-        start_column = self.column
-
-        # Count spaces (4 spaces = 1 indent level)
-        char = self.current_char()
-        while char in (" ", "\t"):
-            if char == " ":
-                indent_level += 1
-            else:  # Tab counts as 4 spaces
-                indent_level += 4
-            self.advance()
-            char = self.current_char()
-
-        # If line is blank or EOF, ignore indentation entirely
-        if char in ("\n", "\r", None):
-            return []
-
-        # Normalize to indent units (4 spaces = 1 indent)
-        indent_units = indent_level // 4
-
-        # Check if indentation is valid (must be multiple of 4)
         if indent_level % 4 != 0:
-            raise LexerError(
-                "Indentation must be multiple of 4 spaces", self.line, start_column
-            )
+            raise LexerError("Indentation must be a multiple of 4 spaces", self.line, 1)
 
-        tokens = []
+        indent_units = indent_level // 4
         current_indent = self.indent_stack[-1]
 
         if indent_units > current_indent:
-            # Indent
             self.indent_stack.append(indent_units)
-            tokens.append(
-                Token(TokenType.INDENT, indent_units, self.line, start_column)
-            )
+            self._emit(TokenType.INDENT, indent_units)
+
         elif indent_units < current_indent:
-            # Dedent (possibly multiple levels)
             while self.indent_stack[-1] > indent_units:
                 self.indent_stack.pop()
-                tokens.append(
-                    Token(
-                        TokenType.DEDENT, self.indent_stack[-1], self.line, start_column
-                    )
-                )
+                self._emit(TokenType.DEDENT, self.indent_stack[-1])
 
-            # Check if we dedented to a valid level
             if self.indent_stack[-1] != indent_units:
-                raise LexerError("Invalid indentation level", self.line, start_column)
+                raise LexerError("Invalid indentation level", self.line, 1)
 
-        return tokens
+    # ─────────────────────────────────────────
+    #  Core DFA transition function  δ(state, char)
+    # ─────────────────────────────────────────
 
-    def tokenize(self) -> List[Token]:
+    def _transition(self, state: LexerState, ch: Optional[str]) -> LexerState:
         """
-        Main tokenization method
-        Converts entire source code into tokens
+        Transition function δ: Q × Σ → Q
 
-        Returns list of tokens
+        Given the current state and input character, advance the
+        automaton, optionally buffering characters or emitting tokens.
+
+        Returns the next state.
         """
-        self.tokens = []
-        line_start = True  # Track if we're at the start of a line
 
-        while self.pos < len(self.source):
-            # Skip whitespace (except at line start for indentation)
-            if not line_start:
-                self.skip_whitespace()
+        # ── START ────────────────────────────────────────────────────────
+        if state == LexerState.START:
+            if ch is None:
+                return LexerState.DONE  # EOF
 
-            # Skip comments
-            self.skip_comment()
+            self._mark_start()
 
-            char = self.current_char()
+            if ch in (" ", "\t"):
+                self._advance()
+                return LexerState.START  # skip whitespace between tokens
 
-            if not char:
-                break
+            if ch == "#":
+                self._advance()
+                return LexerState.IN_COMMENT
 
-            # Handle indentation at line start
-            if line_start and char in (" ", "\t"):
-                indent_tokens = self.handle_indentation(True)
-                self.tokens.extend(indent_tokens)
-                char = self.current_char()
-                line_start = False
-            elif line_start and char not in ("\n", "\r"):
-                # No indentation, but not a blank line
-                indent_tokens = self.handle_indentation(True)
-                self.tokens.extend(indent_tokens)
-                line_start = False
+            if ch == "\r":
+                self._advance()
+                return LexerState.START
 
-            if not char:
-                break
-
-            start_line = self.line
-            start_column = self.column
-
-            # Newline
-            if char == "\n":
-                # Only add NEWLINE if previous token wasn't NEWLINE
+            if ch == "\n":
+                self._advance()
+                # Only emit NEWLINE if the last token wasn't already NEWLINE
                 if not self.tokens or self.tokens[-1].type != TokenType.NEWLINE:
-                    self.tokens.append(
-                        Token(TokenType.NEWLINE, "\n", start_line, start_column)
-                    )
-                self.advance()
-                line_start = True
-                continue
+                    self._emit(TokenType.NEWLINE, "\n")
+                return LexerState.IN_INDENT
 
-            # Skip carriage return
-            if char == "\r":
-                self.advance()
-                continue
+            if ch.isdigit():
+                self._buffer += ch
+                self._advance()
+                return LexerState.IN_NUMBER
 
-            # Numbers
-            if char.isdigit():
-                self.tokens.append(self.read_number())
-                continue
+            if ch.isalpha() or ch == "_":
+                self._buffer += ch
+                self._advance()
+                return LexerState.IN_IDENTIFIER
 
-            # Strings
-            if char in ('"', "'"):
-                self.tokens.append(self.read_string(char))
-                continue
+            if ch == '"':
+                self._string_quote = '"'
+                self._advance()
+                return LexerState.IN_STRING_DOUBLE
 
-            # Identifiers and keywords
-            if char.isalpha() or char == "_":
-                self.tokens.append(self.read_identifier())
-                continue
+            if ch == "'":
+                self._string_quote = "'"
+                self._advance()
+                return LexerState.IN_STRING_SINGLE
 
-            # Two-character operators
-            if char == "=" and self.peek_char() == "=":
-                self.tokens.append(Token(TokenType.EQ, "==", start_line, start_column))
-                self.advance()
-                self.advance()
-                continue
+            # Two-char operator lead characters
+            if ch == "=":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_EQ
+            if ch == "<":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_LT
+            if ch == ">":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_GT
+            if ch == "!":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_BANG
+            if ch == "+":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_PLUS
+            if ch == "-":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_MINUS
+            if ch == "*":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_STAR
+            if ch == "/":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_SLASH
 
-            if char == "!" and self.peek_char() == "=":
-                self.tokens.append(Token(TokenType.NE, "!=", start_line, start_column))
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "<" and self.peek_char() == "=":
-                self.tokens.append(Token(TokenType.LE, "<=", start_line, start_column))
-                self.advance()
-                self.advance()
-                continue
-
-            if char == ">" and self.peek_char() == "=":
-                self.tokens.append(Token(TokenType.GE, ">=", start_line, start_column))
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "*" and self.peek_char() == "*":
-                self.tokens.append(
-                    Token(TokenType.POWER, "**", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "/" and self.peek_char() == "/":
-                self.tokens.append(
-                    Token(TokenType.FLOOR_DIVIDE, "//", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "+" and self.peek_char() == "=":
-                self.tokens.append(
-                    Token(TokenType.PLUS_ASSIGN, "+=", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "-" and self.peek_char() == "=":
-                self.tokens.append(
-                    Token(TokenType.MINUS_ASSIGN, "-=", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "*" and self.peek_char() == "=":
-                self.tokens.append(
-                    Token(TokenType.MULTIPLY_ASSIGN, "*=", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            if char == "/" and self.peek_char() == "=":
-                self.tokens.append(
-                    Token(TokenType.DIVIDE_ASSIGN, "/=", start_line, start_column)
-                )
-                self.advance()
-                self.advance()
-                continue
-
-            # Single-character operators and delimiters
-            single_char_tokens = {
-                "+": TokenType.PLUS,
-                "-": TokenType.MINUS,
-                "*": TokenType.MULTIPLY,
-                "/": TokenType.DIVIDE,
-                "%": TokenType.MODULO,
-                "=": TokenType.ASSIGN,
-                "<": TokenType.LT,
-                ">": TokenType.GT,
+            # Single-character tokens
+            single = {
                 "(": TokenType.LPAREN,
                 ")": TokenType.RPAREN,
                 "[": TokenType.LBRACKET,
@@ -380,49 +302,325 @@ class Lexer:
                 ",": TokenType.COMMA,
                 ":": TokenType.COLON,
                 ".": TokenType.DOT,
+                "%": TokenType.MODULO,
             }
+            if ch in single:
+                self._advance()
+                self._emit(single[ch], ch)
+                return LexerState.START
 
-            if char in single_char_tokens:
-                self.tokens.append(
-                    Token(single_char_tokens[char], char, start_line, start_column)
+            raise LexerError(f"Unexpected character: '{ch}'", self.line, self.column)
+
+        # ── IN_INDENT ────────────────────────────────────────────────────
+        # Count leading whitespace at the start of a new line, then
+        # delegate to _handle_indent() before processing the real token.
+        if state == LexerState.IN_INDENT:
+            indent_level = 0
+
+            # Consume all leading spaces / tabs
+            while self._current() in (" ", "\t"):
+                c = self._current()
+                indent_level += 1 if c == " " else 4  # tab = 4 spaces
+                self._advance()
+
+            next_ch = self._current()
+
+            # Blank line or comment line – skip indentation check entirely
+            if next_ch in ("\n", "\r", "#", None):
+                return LexerState.START
+
+            self._handle_indent(indent_level)
+            return LexerState.START
+
+        # ── IN_NUMBER ────────────────────────────────────────────────────
+        if state == LexerState.IN_NUMBER:
+            if ch and ch.isdigit():
+                self._buffer += ch
+                self._advance()
+                return LexerState.IN_NUMBER
+
+            if ch == ".":
+                # Peek at the char after the dot
+                next_ch = (
+                    self.source[self.pos + 1]
+                    if self.pos + 1 < len(self.source)
+                    else None
                 )
-                self.advance()
-                continue
+                if next_ch and next_ch.isdigit():
+                    # Valid float: e.g. "3.14"
+                    self._buffer += ch
+                    self._advance()
+                    return LexerState.IN_FLOAT
+                # Trailing dot is invalid: e.g. "1." raises an error
+                raise LexerError(
+                    f"Invalid number format: '{self._buffer}.' ends with decimal point",
+                    self._tok_line,
+                    self._tok_col,
+                )
 
-            # Unknown character
+            # Accepting state: emit integer
+            self._emit(TokenType.NUMBER, int(self._buffer))
+            self._reset()
+            return LexerState.START
+
+        # ── IN_FLOAT ─────────────────────────────────────────────────────
+        if state == LexerState.IN_FLOAT:
+            if ch and ch.isdigit():
+                self._buffer += ch
+                self._advance()
+                return LexerState.IN_FLOAT
+
+            if ch == ".":
+                raise LexerError(
+                    "Invalid number: multiple decimal points",
+                    self._tok_line,
+                    self._tok_col,
+                )
+
+            # Accepting state: emit float
+            self._emit(TokenType.NUMBER, float(self._buffer))
+            self._reset()
+            return LexerState.START
+
+        # ── IN_IDENTIFIER ────────────────────────────────────────────────
+        if state == LexerState.IN_IDENTIFIER:
+            if ch and (ch.isalnum() or ch == "_"):
+                self._buffer += ch
+                self._advance()
+                return LexerState.IN_IDENTIFIER
+
+            # Accepting state: keyword or identifier?
+            word = self._buffer
+            tok_type = KEYWORDS.get(word, TokenType.IDENTIFIER)
+            value: Any = word
+
+            if tok_type == TokenType.TRUE:
+                value = True
+            elif tok_type == TokenType.FALSE:
+                value = False
+            elif tok_type == TokenType.NONE:
+                value = None
+
+            self._emit(tok_type, value)
+            self._reset()
+            return LexerState.START
+
+        # ── IN_STRING_DOUBLE / IN_STRING_SINGLE ──────────────────────────
+        if state in (LexerState.IN_STRING_DOUBLE, LexerState.IN_STRING_SINGLE):
+            if ch is None:
+                raise LexerError(
+                    "Unterminated string literal", self._tok_line, self._tok_col
+                )
+            if ch == "\\":
+                # Enter escape sub-state, remembering which string state to return to
+                self._string_escape_state = state
+                self._advance()
+                return LexerState.IN_STRING_ESCAPE
+
+            if ch == self._string_quote:
+                # Accepting state: emit the completed string
+                self._advance()  # consume closing quote
+                self._emit(TokenType.STRING, self._buffer)
+                self._reset()
+                return LexerState.START
+
+            self._buffer += ch
+            self._advance()
+            return state  # stay in same string state
+
+        # ── IN_STRING_ESCAPE ─────────────────────────────────────────────
+        if state == LexerState.IN_STRING_ESCAPE:
+            escape_map = {
+                "n": "\n",
+                "t": "\t",
+                "r": "\r",
+                "\\": "\\",
+                "'": "'",
+                '"': '"',
+            }
+            self._buffer += escape_map.get(ch, ch) if ch else ""
+            if ch:
+                self._advance()
+            # Return to whichever string state we came from
+            return self._string_escape_state  # type: ignore[return-value]
+
+        # ── IN_COMMENT ───────────────────────────────────────────────────
+        if state == LexerState.IN_COMMENT:
+            if ch is None or ch == "\n":
+                return LexerState.START  # comment ends at EOL (don't consume \n)
+            self._advance()
+            return LexerState.IN_COMMENT
+
+        # ── TWO-CHARACTER OPERATOR STATES ─────────────────────────────────
+
+        # SAW_EQ: already buffered '='
+        if state == LexerState.SAW_EQ:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.EQ, "==")
+            else:
+                self._emit(TokenType.ASSIGN, "=")
+            self._reset()
+            return LexerState.START
+
+        # SAW_LT: already buffered '<'
+        if state == LexerState.SAW_LT:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.LE, "<=")
+            else:
+                self._emit(TokenType.LT, "<")
+            self._reset()
+            return LexerState.START
+
+        # SAW_GT: already buffered '>'
+        if state == LexerState.SAW_GT:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.GE, ">=")
+            else:
+                self._emit(TokenType.GT, ">")
+            self._reset()
+            return LexerState.START
+
+        # SAW_BANG: already buffered '!' — only valid next char is '='
+        if state == LexerState.SAW_BANG:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.NE, "!=")
+                self._reset()
+                return LexerState.START
             raise LexerError(
-                f"Unexpected character: '{char}'", start_line, start_column
+                f"Expected '=' after '!' but got '{ch}'", self._tok_line, self._tok_col
             )
 
-        # Add remaining DEDENT tokens for unclosed indents
+        # SAW_PLUS: already buffered '+'
+        if state == LexerState.SAW_PLUS:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.PLUS_ASSIGN, "+=")
+            else:
+                self._emit(TokenType.PLUS, "+")
+            self._reset()
+            return LexerState.START
+
+        # SAW_MINUS: already buffered '-'
+        if state == LexerState.SAW_MINUS:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.MINUS_ASSIGN, "-=")
+            else:
+                self._emit(TokenType.MINUS, "-")
+            self._reset()
+            return LexerState.START
+
+        # SAW_STAR: already buffered '*' — could be '**', '*=', or '*'
+        if state == LexerState.SAW_STAR:
+            if ch == "*":
+                self._advance()
+                self._emit(TokenType.POWER, "**")
+            elif ch == "=":
+                self._advance()
+                self._emit(TokenType.MULTIPLY_ASSIGN, "*=")
+            else:
+                self._emit(TokenType.MULTIPLY, "*")
+            self._reset()
+            return LexerState.START
+
+        # SAW_SLASH: already buffered '/' — could be '//', '/=', or '/'
+        if state == LexerState.SAW_SLASH:
+            if ch == "/":
+                self._advance()
+                self._emit(TokenType.FLOOR_DIVIDE, "//")
+            elif ch == "=":
+                self._advance()
+                self._emit(TokenType.DIVIDE_ASSIGN, "/=")
+            else:
+                self._emit(TokenType.DIVIDE, "/")
+            self._reset()
+            return LexerState.START
+
+        # Should never reach here
+        raise LexerError(
+            f"DFA reached undefined state: {state}", self.line, self.column
+        )
+
+    # ─────────────────────────────────────────
+    #  Public API
+    # ─────────────────────────────────────────
+
+    def tokenize(self) -> List[Token]:
+        """
+        Run the DFA over the entire source string.
+
+        Drives _transition() in a loop until EOF,
+        then closes any open indentation levels and
+        appends the EOF token.
+
+        Returns:
+            List[Token]: the complete token stream
+        """
+        self.tokens = []
+        self._state = LexerState.START
+        self._buffer = ""
+
+        # ── Main DFA loop ────────────────────
+        while True:
+            ch = self._current()
+
+            # Drive one transition
+            next_state = self._transition(self._state, ch)
+            self._state = next_state
+
+            # DONE is the accepting halt state — stop immediately
+            if self._state == LexerState.DONE:
+                break
+
+            # Safety: ERROR state means unrecoverable scan failure
+            if self._state == LexerState.ERROR:
+                raise LexerError("DFA entered ERROR state", self.line, self.column)
+
+        # ── Close remaining indentation levels ───
         while len(self.indent_stack) > 1:
             self.indent_stack.pop()
-            self.tokens.append(
-                Token(TokenType.DEDENT, self.indent_stack[-1], self.line, self.column)
-            )
+            self._emit(TokenType.DEDENT, self.indent_stack[-1])
 
-        # Add EOF token
-        self.tokens.append(Token(TokenType.EOF, None, self.line, self.column))
+        # ── EOF token ────────────────────────────
+        self._emit(TokenType.EOF, None)
 
         return self.tokens
 
     def tokenize_to_string(self) -> str:
         """
-        Tokenize and return a formatted string representation
-        Useful for debugging
+        Tokenize and return a human-readable token listing.
+        Useful for debugging and unit tests.
         """
         tokens = self.tokenize()
-        return "\n".join(str(token) for token in tokens)
+        return "\n".join(str(tok) for tok in tokens)
+
+
+# ─────────────────────────────────────────────
+#  Module-level convenience function
+# ─────────────────────────────────────────────
 
 
 def tokenize(source: str) -> List[Token]:
     """
-    Function to tokenize source code
+    Tokenize PyLite source code using the DFA-based lexer.
 
     Args:
-        source: source code
+        source: Raw PyLite source code string.
 
-    Returns: list of tokens
+    Returns:
+        List[Token]: Ordered list of tokens including EOF.
+
+    Raises:
+        LexerError: On any invalid character or malformed token.
+
+    Example:
+        >>> from optilang.lexer import tokenize
+        >>> tokens = tokenize("x = 5 + 3")
+        >>> [t.type for t in tokens]
+        [IDENTIFIER, ASSIGN, NUMBER, PLUS, NUMBER, EOF]
     """
-    lexer = Lexer(source)
-    return lexer.tokenize()
+    return Lexer(source).tokenize()

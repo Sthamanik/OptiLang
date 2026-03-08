@@ -146,7 +146,7 @@ class Parser:
             self.current_token = None
         return old_token
 
-    def expect(self, token_type: str) -> Token:
+    def expect(self, token_type: TokenType) -> Token:
         """
         Consume token if it matches expected type, otherwise raise error
 
@@ -170,7 +170,7 @@ class Parser:
 
         return self.advance()
 
-    def match(self, *token_types: str) -> bool:
+    def match(self, *token_types: TokenType) -> bool:
         """
         Check if current token matches any of the given types
 
