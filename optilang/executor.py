@@ -1,6 +1,7 @@
 """
 Runtime executor for OptiLang AST programs.
 """
+
 from __future__ import annotations
 
 import time
@@ -295,17 +296,13 @@ class Executor:
             return
         elapsed = time.perf_counter() - self._start_time
         if elapsed > self.timeout_seconds:
-            raise OptiTimeoutError(
-                self.timeout_seconds, getattr(node, "line", None)
-            )
+            raise OptiTimeoutError(self.timeout_seconds, getattr(node, "line", None))
 
     def _execute_program(self, program: ProgramNode) -> None:
         """Execute the top-level list of statements."""
         self._execute_block(program.statements, self.globals)
 
-    def _execute_block(
-        self, statements: List[ASTNode], env: Environment
-    ) -> None:
+    def _execute_block(self, statements: List[ASTNode], env: Environment) -> None:
         """Execute a list of statements sequentially in the given scope."""
         for statement in statements:
             self._check_timeout(statement)
@@ -325,9 +322,7 @@ class Executor:
             if self.profiler is not None:
                 self.profiler.end_line(line_num)
 
-    def _execute_statement_impl(
-        self, node: ASTNode, env: Environment
-    ) -> None:
+    def _execute_statement_impl(self, node: ASTNode, env: Environment) -> None:
         """Dispatch and execute a single statement node."""
         if isinstance(node, AssignmentNode):
             env.assign(node.target.name, self._eval(node.value, env))
@@ -389,9 +384,7 @@ class Executor:
             return
 
         if isinstance(node, ReturnNode):
-            value = (
-                self._eval(node.value, env) if node.value is not None else None
-            )
+            value = self._eval(node.value, env) if node.value is not None else None
             raise _ReturnSignal(value)
 
         if isinstance(node, BreakNode):
@@ -450,9 +443,7 @@ class Executor:
                 try:
                     return -operand
                 except TypeError as exc:
-                    raise OptiTypeError(
-                        f"Invalid unary '-': {exc}", node.line
-                    ) from exc
+                    raise OptiTypeError(f"Invalid unary '-': {exc}", node.line) from exc
             if node.operator == "not":
                 return not self._truthy(operand)
             raise OptiRuntimeError(
@@ -543,9 +534,7 @@ class Executor:
         except OptiRuntimeError:  # pylint: disable=try-except-raise
             raise
         except (TypeError, ValueError, ArithmeticError) as exc:
-            raise OptiTypeError(
-                f"Invalid operation '{op}': {exc}", node.line
-            ) from exc
+            raise OptiTypeError(f"Invalid operation '{op}': {exc}", node.line) from exc
 
         raise OptiRuntimeError(f"Unsupported binary operator: {op}", node.line)
 
@@ -567,13 +556,9 @@ class Executor:
             if value == 0:
                 raise OptiZeroDivisionError(node.line)
             return current / value
-        raise OptiRuntimeError(
-            f"Unsupported augmented operator: {operator}", node.line
-        )
+        raise OptiRuntimeError(f"Unsupported augmented operator: {operator}", node.line)
 
-    def _call(
-        self, callee: Any, args: List[Any], node: FunctionCallNode
-    ) -> Any:
+    def _call(self, callee: Any, args: List[Any], node: FunctionCallNode) -> Any:
         """Invoke a callable (user function or built-in)."""
         if isinstance(callee, UserFunction):
             return callee.call(self, args)
@@ -581,9 +566,7 @@ class Executor:
             try:
                 return callee(*args)
             except TypeError as exc:
-                raise OptiTypeError(
-                    f"Invalid function call: {exc}", node.line
-                ) from exc
+                raise OptiTypeError(f"Invalid function call: {exc}", node.line) from exc
             except ValueError as exc:
                 raise OptiValueError(str(exc), node.line) from exc
         raise OptiTypeError("Object is not callable", node.line)
@@ -625,9 +608,7 @@ class Executor:
             return f"<builtin {fn_name}>"
         return value
 
-    def get_symbol_table(
-        self, include_builtins: bool = False
-    ) -> Dict[str, Any]:
+    def get_symbol_table(self, include_builtins: bool = False) -> Dict[str, Any]:
         """
         Return the global symbol table as a serializable dictionary.
 

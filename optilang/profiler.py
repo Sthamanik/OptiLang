@@ -161,17 +161,17 @@ def estimate_memory_bytes(env_values: Dict[str, Any]) -> int:
                 for item in value:
                     try:
                         total += sys.getsizeof(item)
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         total += 28  # fallback for unknown types
 
             elif isinstance(value, dict):
                 for k, v in value.items():
                     try:
                         total += sys.getsizeof(k) + sys.getsizeof(v)
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         total += 56  # fallback
 
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             total += 28  # fallback: approximate size of a small Python object
 
     return total
