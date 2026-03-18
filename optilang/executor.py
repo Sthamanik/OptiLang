@@ -1,9 +1,11 @@
 """
 Runtime executor for OptiLang AST programs.
+
+The public execute() function at the bottom of this module orchestrates
+the full pipeline: tokenize → parse → semantic analysis → run.
 """
 
 from __future__ import annotations
-
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -38,6 +40,7 @@ from .lexer import tokenize
 from .models import ExecutionResult
 from .parser import parse
 from .profiler import Profiler, ProfilingData
+from .semantic_analyzer import SemanticAnalyzer
 from .utils.errors import (
     ArgumentError,
     IndexError as OptiIndexError,
@@ -46,6 +49,7 @@ from .utils.errors import (
     ParserError,
     RecursionError as OptiRecursionError,
     RuntimeError as OptiRuntimeError,
+    SemanticError,
     TimeoutError as OptiTimeoutError,
     TypeError as OptiTypeError,
     ValueError as OptiValueError,
@@ -235,7 +239,10 @@ class Executor:
 
     def run(self, program: ProgramNode) -> ExecutionResult:
         """
-        Execute a parsed program and return its result.
+        Execute a parsed, semantically-validated program and return its result.
+
+        Note: SemanticAnalyzer().analyze(program) must be called before this
+        method. The public execute() function handles this automatically.
 
         Args:
             program: The root ProgramNode from the parser.
@@ -310,106 +317,101 @@ class Executor:
 
     def _execute_statement(self, node: ASTNode, env: Environment) -> None:
         """Wrap a single statement with profiler hooks, then execute it."""
-        line_num = getattr(node, "line", 0)
+        line = getattr(node, "line", None)
 
-        if self.profiler is not None:
-            # Pass the full env dict so profiler can estimate memory usage
-            self.profiler.start_line(line_num, env.all_values())
+        if self.profiler is not None and line is not None:
+            self.profiler.start_line(line, env.all_values())
 
         try:
-            self._execute_statement_impl(node, env)
+            self._exec(node, env)
         finally:
-            if self.profiler is not None:
-                self.profiler.end_line(line_num)
+            if self.profiler is not None and line is not None:
+                self.profiler.end_line(line)
 
-    def _execute_statement_impl(self, node: ASTNode, env: Environment) -> None:
-        """Dispatch and execute a single statement node."""
+    def _exec(self, node: ASTNode, env: Environment) -> None:
+        """Execute a single AST statement node."""
         if isinstance(node, AssignmentNode):
-            env.assign(node.target.name, self._eval(node.value, env))
-            return
-
-        if isinstance(node, AugmentedAssignmentNode):
-            target = node.target.name
-            current = env.get(target, node.target)
             value = self._eval(node.value, env)
-            result = self._apply_augmented(node.operator, current, value, node)
-            env.assign(target, result)
-            return
+            env.assign(node.target.name, value)
 
-        if isinstance(node, IfNode):
-            if self._truthy(self._eval(node.condition, env)):
+        elif isinstance(node, AugmentedAssignmentNode):
+            current = env.get(node.target.name, node.target)
+            value = self._eval(node.value, env)
+            new_value = self._apply_augmented_op(node.operator, current, value, node)
+            env.assign(node.target.name, new_value)
+
+        elif isinstance(node, IfNode):
+            condition = self._eval(node.condition, env)
+            if self._truthy(condition):
                 self._execute_block(node.if_block, env)
-                return
-            for cond, block in node.elif_parts:
-                if self._truthy(self._eval(cond, env)):
-                    self._execute_block(block, env)
-                    return
-            if node.else_block is not None:
-                self._execute_block(node.else_block, env)
-            return
+            else:
+                matched = False
+                for elif_cond, elif_block in node.elif_parts:
+                    if self._truthy(self._eval(elif_cond, env)):
+                        self._execute_block(elif_block, env)
+                        matched = True
+                        break
+                if not matched and node.else_block:
+                    self._execute_block(node.else_block, env)
 
-        if isinstance(node, WhileNode):
+        elif isinstance(node, WhileNode):
             while self._truthy(self._eval(node.condition, env)):
                 self._check_timeout(node)
                 try:
                     self._execute_block(node.body, env)
-                except _ContinueSignal:
-                    continue
                 except _BreakSignal:
                     break
-            return
+                except _ContinueSignal:
+                    continue
 
-        if isinstance(node, ForNode):
+        elif isinstance(node, ForNode):
             iterable = self._eval(node.iterable, env)
             try:
-                iterator = iter(iterable)
+                items = list(iterable)
             except TypeError as exc:
                 raise OptiTypeError(
                     f"Object is not iterable: {exc}", node.line
                 ) from exc
-
-            for value in iterator:
+            for item in items:
                 self._check_timeout(node)
-                env.assign(node.iterator.name, value)
+                env.assign(node.iterator.name, item)
                 try:
                     self._execute_block(node.body, env)
-                except _ContinueSignal:
-                    continue
                 except _BreakSignal:
                     break
-            return
+                except _ContinueSignal:
+                    continue
 
-        if isinstance(node, FunctionDefNode):
-            env.define(node.name.name, UserFunction(node, env))
-            return
+        elif isinstance(node, FunctionDefNode):
+            func = UserFunction(node, env)
+            env.define(node.name.name, func)
 
-        if isinstance(node, ReturnNode):
+        elif isinstance(node, ReturnNode):
             value = self._eval(node.value, env) if node.value is not None else None
             raise _ReturnSignal(value)
 
-        if isinstance(node, BreakNode):
+        elif isinstance(node, BreakNode):
             raise _BreakSignal()
 
-        if isinstance(node, ContinueNode):
+        elif isinstance(node, ContinueNode):
             raise _ContinueSignal()
 
-        if isinstance(node, PassNode):
-            return
+        elif isinstance(node, PassNode):
+            pass
 
-        if isinstance(node, TryNode):
+        elif isinstance(node, TryNode):
             try:
                 self._execute_block(node.try_block, env)
             except OptiRuntimeError:
-                if node.except_block is None:
-                    raise
-                self._execute_block(node.except_block, env)
+                if node.except_block is not None:
+                    self._execute_block(node.except_block, env)
             finally:
                 if node.finally_block is not None:
                     self._execute_block(node.finally_block, env)
-            return
 
-        # Expression statement (e.g. a bare function call)
-        self._eval(node, env)
+        else:
+            # Expression statement (e.g. a bare function call)
+            self._eval(node, env)
 
     def _eval(self, node: ASTNode, env: Environment) -> Any:
         """
@@ -488,6 +490,7 @@ class Executor:
         """
         op = node.operator
 
+        # Short-circuit operators
         if op == "and":
             left = self._eval(node.left, env)
             return left if not self._truthy(left) else self._eval(node.right, env)
@@ -531,21 +534,15 @@ class Executor:
                 return left > right
             if op == ">=":
                 return left >= right
-        except OptiRuntimeError:  # pylint: disable=try-except-raise
-            raise
-        except (TypeError, ValueError, ArithmeticError) as exc:
-            raise OptiTypeError(f"Invalid operation '{op}': {exc}", node.line) from exc
+        except (TypeError, ValueError) as exc:
+            raise OptiTypeError(str(exc), node.line) from exc
 
-        raise OptiRuntimeError(f"Unsupported binary operator: {op}", node.line)
+        raise OptiRuntimeError(f"Unsupported operator: {op}", node.line)
 
-    def _apply_augmented(
-        self,
-        operator: str,
-        current: Any,
-        value: Any,
-        node: AugmentedAssignmentNode,
+    def _apply_augmented_op(
+        self, operator: str, current: Any, value: Any, node: ASTNode
     ) -> Any:
-        """Apply an augmented assignment operator (+=, -=, *=, /=)."""
+        """Apply an augmented assignment operator and return the new value."""
         if operator == "+=":
             return current + value
         if operator == "-=":
@@ -623,34 +620,39 @@ class Executor:
         return table
 
 
+# Public API
+
+
 def execute(
     source: str,
     timeout_seconds: float = 5.0,
     enable_profiling: bool = True,
 ) -> ExecutionResult:
     """
-    Parse and execute OptiLang source code.
+    Tokenize, parse, semantically analyse, and execute OptiLang source code.
 
-    Args:
-        source:           PyLite source code string.
-        timeout_seconds:  Maximum allowed execution time in seconds.
-                          Set <= 0 to disable the timeout.
-        enable_profiling: Whether to collect profiling data. Defaults to True.
+    Full pipeline:
+        tokenize(source)
+            → parse(tokens)
+                → SemanticAnalyzer().analyze(program)
+                    → Executor(...).run(program)
 
-    Returns:
-        ExecutionResult containing output, errors, execution time,
-        profiling data, and the final symbol table.
+    If any phase raises an error, execution is aborted immediately and the
+    error message is returned inside result.errors. The later phases
+    (profiling, optimizer, scorer) are never reached in that case.
     """
     start = time.perf_counter()
 
     try:
         tokens = tokenize(source)
         program = parse(tokens)
+        SemanticAnalyzer().analyze(program)
         return Executor(
             timeout_seconds=timeout_seconds,
             enable_profiling=enable_profiling,
         ).run(program)
-    except (LexerError, ParserError, OptiRuntimeError) as exc:
+
+    except (LexerError, ParserError, SemanticError, OptiRuntimeError) as exc:
         elapsed = time.perf_counter() - start
         return ExecutionResult(
             output="",
