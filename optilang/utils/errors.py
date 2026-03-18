@@ -3,6 +3,29 @@ Error classes for OptiLang.
 
 All exceptions inherit from OptiLangError for easy catching.
 Each error type includes location information when available.
+
+Error hierarchy:
+    OptiLangError
+    ├── LexerError          (tokenization failures)
+    ├── ParserError         (syntax errors)
+    ├── SemanticError       (structural violations detected before execution)
+    └── RuntimeError        (execution-time failures)
+        ├── TimeoutError
+        ├── NameError
+        ├── TypeError
+        ├── ValueError
+        ├── ZeroDivisionError
+        ├── IndexError
+        ├── KeyError
+        ├── RecursionError
+        ├── ArgumentError
+        └── AttributeError
+
+Pipeline position of each error type:
+    Lexer    → raises LexerError
+    Parser   → raises ParserError
+    Semantic → raises SemanticError   ← new phase, before execution
+    Executor → raises RuntimeError subclasses
 """
 
 from typing import Optional, Any
@@ -64,6 +87,24 @@ class ParserError(OptiLangError):
         super().__init__(message, line, column)
 
 
+class SemanticError(OptiLangError):
+    """
+    Exception raised for semantic violations detected before execution.
+
+    Detected by SemanticAnalyzer using the Visitor Pattern + Scope Stack
+    algorithm in a single DFS pass over the AST before execution begins.
+
+    Checks currently performed:
+        - 'return' statement outside any function definition
+        - 'break' statement outside any loop (for / while)
+        - 'continue' statement outside any loop (for / while)
+        - Duplicate parameter names in a function definition
+    """
+
+    def __init__(self, message: str, line: Optional[int] = None):
+        super().__init__(message, line)
+
+
 class RuntimeError(OptiLangError):
     """Runtime execution errors (undefined variables, type errors, etc.)."""
 
@@ -76,7 +117,7 @@ class RuntimeError(OptiLangError):
         super().__init__(message, line)
 
 
-class TimeoutError(OptiLangError):
+class TimeoutError(RuntimeError):
     """Execution timeout errors (infinite loops, excessive runtime)."""
 
     def __init__(self, timeout_seconds: float, line: Optional[int] = None):
@@ -155,7 +196,7 @@ class RecursionError(RuntimeError):
 
 
 class ArgumentError(RuntimeError):
-    """Function argument errors."""
+    """Function argument count mismatch."""
 
     def __init__(
         self, func_name: str, expected: int, got: int, line: Optional[int] = None
