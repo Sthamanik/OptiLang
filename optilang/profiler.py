@@ -11,10 +11,11 @@ This module provides line-by-line profiling during code execution, collecting:
 """
 
 import json
+import random
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -118,6 +119,12 @@ class ProfilingData:
     total_lines_executed: int = 0
     peak_memory_bytes: int = 0  # highest memory observed at any point
     complexity_estimate: str = "O(1)"  # detected time complexity class
+    complexity_method: str = "heuristic"
+    complexity_confidence: float = 1.0
+    sampled_lines: int = 0
+    skipped_lines: int = 0
+    line_sampling_rate: float = 1.0
+    memory_mode: str = "shallow"
     start_time: Optional[float] = None
     end_time: Optional[float] = None
 
@@ -135,10 +142,124 @@ class ProfilingData:
             "lines_profiled": len(self.line_stats),
             "peak_memory_bytes": self.peak_memory_bytes,
             "complexity_estimate": self.complexity_estimate,
+            "complexity_method": self.complexity_method,
+            "complexity_confidence": round(self.complexity_confidence, 3),
+            "sampled_lines": self.sampled_lines,
+            "skipped_lines": self.skipped_lines,
+            "line_sampling_rate": self.line_sampling_rate,
+            "memory_mode": self.memory_mode,
         }
 
 
-def estimate_memory_bytes(env_values: Dict[str, Any]) -> int:
+@dataclass
+class ProfilerConfig:
+    """Runtime configuration for profiling overhead/precision tradeoffs."""
+
+    memory_mode: str = "shallow"  # "off" | "shallow" | "deep"
+    deep_max_depth: int = 3
+    deep_max_items: int = 500
+    line_sampling_rate: float = 1.0
+    random_seed: Optional[int] = None
+
+    def normalized_memory_mode(self) -> str:
+        """Return a safe memory mode; defaults to shallow for invalid values."""
+        mode = self.memory_mode.strip().lower()
+        if mode in {"off", "shallow", "deep"}:
+            return mode
+        return "shallow"
+
+    def normalized_sampling_rate(self) -> float:
+        """Clamp sampling rate to [0.0, 1.0]."""
+        return min(1.0, max(0.0, self.line_sampling_rate))
+
+    def normalized_deep_max_depth(self) -> int:
+        """Ensure deep profiling depth is a non-negative integer."""
+        return max(0, int(self.deep_max_depth))
+
+    def normalized_deep_max_items(self) -> int:
+        """Ensure deep profiling item budget is non-negative."""
+        return max(0, int(self.deep_max_items))
+
+
+def _safe_getsizeof(value: Any) -> int:
+    """Best-effort object size lookup with fallback."""
+    try:
+        return sys.getsizeof(value)
+    except (TypeError, ValueError):
+        return 28
+
+
+def _estimate_memory_shallow(env_values: Dict[str, Any]) -> int:
+    """Estimate memory in a shallow way (one level into list/dict)."""
+    total = 0
+    for value in env_values.values():
+        total += _safe_getsizeof(value)
+
+        if isinstance(value, list):
+            for item in value:
+                total += _safe_getsizeof(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                total += _safe_getsizeof(key) + _safe_getsizeof(item)
+
+    return total
+
+
+def _estimate_deep_object_size(
+    value: Any,
+    max_depth: int,
+    max_items: int,
+) -> int:
+    """Estimate object size recursively with cycle and budget protection."""
+    seen: Set[int] = set()
+    remaining = max_items
+
+    def walk(current: Any, depth: int) -> int:
+        nonlocal remaining
+
+        obj_id = id(current)
+        if obj_id in seen:
+            return 0
+        seen.add(obj_id)
+
+        total_size = _safe_getsizeof(current)
+        if depth >= max_depth or remaining <= 0:
+            return total_size
+
+        if isinstance(current, dict):
+            for key, item in current.items():
+                if remaining <= 0:
+                    break
+                remaining -= 1
+                total_size += walk(key, depth + 1)
+                if remaining <= 0:
+                    break
+                remaining -= 1
+                total_size += walk(item, depth + 1)
+
+        elif isinstance(current, (list, tuple, set, frozenset)):
+            for item in current:
+                if remaining <= 0:
+                    break
+                remaining -= 1
+                total_size += walk(item, depth + 1)
+
+        elif hasattr(current, "__dict__"):
+            if remaining > 0:
+                remaining -= 1
+                total_size += walk(vars(current), depth + 1)
+
+        return total_size
+
+    return walk(value, depth=0)
+
+
+def estimate_memory_bytes(
+    env_values: Dict[str, Any],
+    mode: str = "shallow",
+    deep_max_depth: int = 3,
+    deep_max_items: int = 500,
+) -> int:
     """
     Estimate the total memory used by variables currently in scope.
 
@@ -152,29 +273,66 @@ def estimate_memory_bytes(env_values: Dict[str, Any]) -> int:
     Returns:
         Estimated total memory in bytes
     """
-    total = 0
-    for value in env_values.values():
-        try:
-            total += sys.getsizeof(value)
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "off":
+        return 0
+    if normalized_mode == "deep":
+        max_depth = max(0, int(deep_max_depth))
+        max_items = max(0, int(deep_max_items))
+        return sum(
+            _estimate_deep_object_size(value, max_depth=max_depth, max_items=max_items)
+            for value in env_values.values()
+        )
+    return _estimate_memory_shallow(env_values)
 
-            if isinstance(value, list):
-                for item in value:
-                    try:
-                        total += sys.getsizeof(item)
-                    except TypeError, ValueError:
-                        total += 28  # fallback for unknown types
 
-            elif isinstance(value, dict):
-                for k, v in value.items():
-                    try:
-                        total += sys.getsizeof(k) + sys.getsizeof(v)
-                    except TypeError, ValueError:
-                        total += 56  # fallback
+def detect_complexity_with_confidence(
+    line_stats: Dict[int, LineStats]
+) -> Tuple[str, float]:
+    """
+    Return complexity class and heuristic confidence score.
 
-        except TypeError, ValueError:
-            total += 28  # fallback: approximate size of a small Python object
+    Confidence is a rough indicator [0.0, 1.0], not a statistical guarantee.
+    """
+    if not line_stats:
+        return "O(1)", 0.95
 
-    return total
+    counts = [s.execution_count for s in line_stats.values()]
+    max_count = max(counts)
+    unique_lines = len(line_stats)
+    total_executions = sum(counts)
+
+    if max_count <= 1:
+        return "O(1)", 0.95
+
+    if max_count <= 15:
+        complexity = "O(log n)"
+        base_confidence = 0.65
+    elif max_count <= 1_000:
+        complexity = "O(n)"
+        base_confidence = 0.75
+    elif max_count <= 10_000:
+        ratio = max_count / max(unique_lines, 1)
+        complexity = "O(n log n)" if ratio < 200 else "O(n^2)"
+        base_confidence = 0.65
+    elif max_count <= 1_000_000:
+        complexity = "O(n^2)"
+        base_confidence = 0.8
+    else:
+        complexity = "O(n^3) or worse"
+        base_confidence = 0.85
+
+    dominance = max_count / max(total_executions, 1)
+    if dominance > 0.8:
+        base_confidence += 0.1
+    elif dominance < 0.3:
+        base_confidence -= 0.1
+
+    if unique_lines <= 2:
+        base_confidence += 0.05
+
+    confidence = min(0.99, max(0.05, base_confidence))
+    return complexity, confidence
 
 
 def detect_complexity(line_stats: Dict[int, LineStats]) -> str:
@@ -200,32 +358,8 @@ def detect_complexity(line_stats: Dict[int, LineStats]) -> str:
     Returns:
         A string representing the estimated complexity class
     """
-    if not line_stats:
-        return "O(1)"
-
-    counts = [s.execution_count for s in line_stats.values()]
-    max_count = max(counts)
-    unique_lines = len(line_stats)
-
-    if max_count <= 1:
-        return "O(1)"
-
-    if max_count <= 15:
-        return "O(log n)"
-
-    if max_count <= 1_000:
-        return "O(n)"
-
-    if max_count <= 10_000:
-        ratio = max_count / max(unique_lines, 1)
-        if ratio < 200:
-            return "O(n log n)"
-        return "O(n^2)"
-
-    if max_count <= 1_000_000:
-        return "O(n^2)"
-
-    return "O(n^3) or worse"
+    complexity, _confidence = detect_complexity_with_confidence(line_stats)
+    return complexity
 
 
 class Profiler:
@@ -254,12 +388,18 @@ class Profiler:
         summary = profiler.get_summary()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: Optional[ProfilerConfig] = None) -> None:
+        self.config = config or ProfilerConfig()
         self.data = ProfilingData()
         self._current_line_start: Optional[float] = None
+        self._current_line_number: Optional[int] = None
+        self._current_line_sampled = False
         # Each entry: (func_name, start_time, depth, caller)
         self._function_call_stack: List[Tuple[str, float, int, Optional[str]]] = []
         self._enabled = True
+        self._rng = random.Random(self.config.random_seed)
+        self.data.line_sampling_rate = self.config.normalized_sampling_rate()
+        self.data.memory_mode = self.config.normalized_memory_mode()
 
     # ── Session Control ──
 
@@ -283,7 +423,18 @@ class Profiler:
         self.data.total_lines_executed = sum(
             s.execution_count for s in self.data.line_stats.values()
         )
-        self.data.complexity_estimate = detect_complexity(self.data.line_stats)
+        complexity, confidence = detect_complexity_with_confidence(
+            self.data.line_stats
+        )
+        sampling_rate = self.config.normalized_sampling_rate()
+        sampling_adjusted_confidence = confidence * (
+            0.5 + (0.5 * sampling_rate)
+        )
+        self.data.complexity_estimate = complexity
+        self.data.complexity_method = "heuristic"
+        self.data.complexity_confidence = max(
+            0.05, min(0.99, sampling_adjusted_confidence)
+        )
 
     # ── Line Profiling ──
 
@@ -306,9 +457,27 @@ class Profiler:
         if line_number not in self.data.line_stats:
             self.data.line_stats[line_number] = LineStats(line_number)
 
-        if env_values is not None:
+        sampling_rate = self.config.normalized_sampling_rate()
+        sampled = sampling_rate >= 1.0 or self._rng.random() < sampling_rate
+        self._current_line_number = line_number
+        self._current_line_sampled = sampled
+
+        if not sampled:
+            self.data.skipped_lines += 1
+            self._current_line_start = None
+            return
+
+        self.data.sampled_lines += 1
+
+        mode = self.config.normalized_memory_mode()
+        if env_values is not None and mode != "off":
             var_count = len(env_values)
-            mem_bytes = estimate_memory_bytes(env_values)
+            mem_bytes = estimate_memory_bytes(
+                env_values,
+                mode=mode,
+                deep_max_depth=self.config.normalized_deep_max_depth(),
+                deep_max_items=self.config.normalized_deep_max_items(),
+            )
         else:
             var_count = 0
             mem_bytes = 0
@@ -329,15 +498,34 @@ class Profiler:
         Args:
             line_number: The source line number that just finished executing
         """
-        if not self._enabled or self._current_line_start is None:
+        if not self._enabled:
+            return
+
+        if self._current_line_number is None:
+            return
+
+        resolved_line = self._current_line_number
+        if resolved_line not in self.data.line_stats:
+            self.data.line_stats[resolved_line] = LineStats(resolved_line)
+
+        if not self._current_line_sampled:
+            self.data.line_stats[resolved_line].execution_count += 1
+            self._current_line_number = None
+            self._current_line_start = None
+            self._current_line_sampled = False
+            return
+
+        if self._current_line_start is None:
+            self._current_line_number = None
+            self._current_line_sampled = False
             return
 
         elapsed_ms = (time.perf_counter() - self._current_line_start) * 1000
+        self.data.line_stats[resolved_line].update_time(elapsed_ms)
 
-        if line_number in self.data.line_stats:
-            self.data.line_stats[line_number].update_time(elapsed_ms)
-
+        self._current_line_number = None
         self._current_line_start = None
+        self._current_line_sampled = False
 
     # ── Function Profiling ──
 
@@ -489,10 +677,16 @@ class Profiler:
             "peak_memory_bytes": self.data.peak_memory_bytes,
             "peak_memory_kb": round(self.data.peak_memory_bytes / 1024, 2),
             "complexity_estimate": self.data.complexity_estimate,
+            "complexity_method": self.data.complexity_method,
+            "complexity_confidence": round(self.data.complexity_confidence, 3),
             "functions_called": len(self.data.function_stats),
             "total_function_calls": sum(
                 f.call_count for f in self.data.function_stats.values()
             ),
+            "sampled_lines": self.data.sampled_lines,
+            "skipped_lines": self.data.skipped_lines,
+            "line_sampling_rate": self.data.line_sampling_rate,
+            "memory_mode": self.data.memory_mode,
             "hottest_lines": [s.to_dict() for s in hottest_lines],
             "most_executed_lines": [s.to_dict() for s in most_executed],
             "hottest_functions": [f.to_dict() for f in hottest_funcs],
@@ -504,7 +698,11 @@ class Profiler:
         """Reset all profiling data for a fresh session."""
         self.data = ProfilingData()
         self._current_line_start = None
+        self._current_line_number = None
+        self._current_line_sampled = False
         self._function_call_stack = []
+        self.data.line_sampling_rate = self.config.normalized_sampling_rate()
+        self.data.memory_mode = self.config.normalized_memory_mode()
 
     def enable(self) -> None:
         """Enable profiling (on by default)."""

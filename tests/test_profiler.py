@@ -13,15 +13,24 @@ Covers:
 - Integration with execute()
 """
 
+import io
+import runpy
+import subprocess
+import sys
 import time
+from contextlib import redirect_stdout
+from pathlib import Path
 
 from optilang.profiler import (
     Profiler,
+    ProfilerConfig,
     ProfilingData,
     LineStats,
     FunctionStats,
     estimate_memory_bytes,
     detect_complexity,
+    detect_complexity_with_confidence,
+    profile_execution,
 )
 from optilang import execute
 
@@ -64,6 +73,49 @@ class TestEstimateMemoryBytes:
         # Should not crash on None, bool, or nested lists
         result = estimate_memory_bytes({"a": None, "b": True, "c": [[1, 2], [3, 4]]})
         assert result >= 0
+
+    def test_memory_mode_off_returns_zero(self) -> None:
+        result = estimate_memory_bytes({"x": [1, 2, 3]}, mode="off")
+        assert result == 0
+
+    def test_deep_memory_mode_accounts_for_nested_objects(self) -> None:
+        nested = {"x": [{"a": [1, 2, 3, 4]}]}
+        shallow = estimate_memory_bytes(nested, mode="shallow")
+        deep = estimate_memory_bytes(nested, mode="deep")
+        assert deep >= shallow
+
+    def test_deep_memory_mode_respects_depth_limit(self) -> None:
+        nested = {"x": [{"a": [1, 2, 3, 4]}]}
+        deep_low = estimate_memory_bytes(
+            nested, mode="deep", deep_max_depth=1, deep_max_items=100
+        )
+        deep_high = estimate_memory_bytes(
+            nested, mode="deep", deep_max_depth=5, deep_max_items=100
+        )
+        assert deep_high >= deep_low
+
+    def test_invalid_mode_falls_back_to_shallow(self) -> None:
+        env = {"x": [1, 2, 3]}
+        shallow = estimate_memory_bytes(env, mode="shallow")
+        invalid = estimate_memory_bytes(env, mode="unknown-mode")
+        assert invalid == shallow
+
+    def test_deep_mode_zero_item_budget_still_counts_container(self) -> None:
+        env = {"x": [1, 2, 3, 4, 5]}
+        deep_zero_items = estimate_memory_bytes(
+            env, mode="deep", deep_max_depth=10, deep_max_items=0
+        )
+        assert deep_zero_items > 0
+
+    def test_deep_mode_handles_objects_with_dict(self) -> None:
+        class Box:
+            def __init__(self) -> None:
+                self.payload = [1, 2, 3, 4]
+
+        env = {"obj": Box()}
+        shallow = estimate_memory_bytes(env, mode="shallow")
+        deep = estimate_memory_bytes(env, mode="deep", deep_max_depth=5, deep_max_items=100)
+        assert deep >= shallow
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +164,39 @@ class TestDetectComplexity:
         # Max count > 1,000,000 → O(n³) or worse
         stats = self._make_stats([2_000_000])
         assert detect_complexity(stats) == "O(n^3) or worse"
+
+    def test_detect_complexity_with_confidence_range(self) -> None:
+        stats = self._make_stats([1, 200, 10])
+        complexity, confidence = detect_complexity_with_confidence(stats)
+        assert complexity == "O(n)"
+        assert 0.0 <= confidence <= 1.0
+
+    def test_detect_complexity_with_confidence_nlogn_branch(self) -> None:
+        stats = self._make_stats([10_000] * 200)
+        complexity, confidence = detect_complexity_with_confidence(stats)
+        assert complexity == "O(n log n)"
+        assert 0.0 <= confidence <= 1.0
+
+
+class TestProfilerConfig:
+    """Normalization and clamping behavior for ProfilerConfig."""
+
+    def test_memory_mode_invalid_defaults_to_shallow(self) -> None:
+        cfg = ProfilerConfig(memory_mode="invalid")
+        assert cfg.normalized_memory_mode() == "shallow"
+
+    def test_sampling_rate_clamps_low(self) -> None:
+        cfg = ProfilerConfig(line_sampling_rate=-0.2)
+        assert cfg.normalized_sampling_rate() == 0.0
+
+    def test_sampling_rate_clamps_high(self) -> None:
+        cfg = ProfilerConfig(line_sampling_rate=1.7)
+        assert cfg.normalized_sampling_rate() == 1.0
+
+    def test_deep_bounds_clamp_non_negative(self) -> None:
+        cfg = ProfilerConfig(deep_max_depth=-2, deep_max_items=-10)
+        assert cfg.normalized_deep_max_depth() == 0
+        assert cfg.normalized_deep_max_items() == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -503,8 +588,14 @@ class TestProfilerDirect:
             "peak_memory_bytes",
             "peak_memory_kb",
             "complexity_estimate",
+            "complexity_method",
+            "complexity_confidence",
             "functions_called",
             "total_function_calls",
+            "sampled_lines",
+            "skipped_lines",
+            "line_sampling_rate",
+            "memory_mode",
             "hottest_lines",
             "most_executed_lines",
             "hottest_functions",
@@ -520,6 +611,8 @@ class TestProfilerDirect:
         assert summary["total_lines_executed"] == 3
         assert summary["unique_lines_profiled"] == 3
         assert summary["complexity_estimate"] == "O(1)"
+        assert summary["complexity_method"] == "heuristic"
+        assert 0.0 <= summary["complexity_confidence"] <= 1.0
         assert isinstance(summary["hottest_lines"], list)
         assert isinstance(summary["hottest_functions"], list)
 
@@ -533,6 +626,18 @@ class TestProfilerDirect:
         assert summary["peak_memory_kb"] == round(
             summary["peak_memory_bytes"] / 1024, 2
         )
+
+    def test_summary_includes_config_metadata(self) -> None:
+        p = Profiler(
+            config=ProfilerConfig(memory_mode="deep", line_sampling_rate=0.5)
+        )
+        p.start()
+        p.start_line(1, {"x": [1, 2, 3]})
+        p.end_line(1)
+        p.stop()
+        summary = p.get_summary()
+        assert summary["memory_mode"] == "deep"
+        assert summary["line_sampling_rate"] == 0.5
 
     # ── Enable / Disable ─────────────────────────────────────────────────
 
@@ -555,6 +660,55 @@ class TestProfilerDirect:
         p.end_line(1)
         p.stop()
         assert 1 in p.data.line_stats
+
+    def test_sampling_zero_keeps_counts_without_timing(self) -> None:
+        p = Profiler(config=ProfilerConfig(line_sampling_rate=0.0))
+        p.start()
+        for _ in range(5):
+            p.start_line(1, {"x": 1})
+            p.end_line(1)
+        p.stop()
+        stats = p.data.line_stats[1]
+        assert stats.execution_count == 5
+        assert stats.total_time_ms == 0.0
+        assert p.data.sampled_lines == 0
+        assert p.data.skipped_lines == 5
+
+    def test_memory_mode_off_skips_memory_tracking(self) -> None:
+        p = Profiler(config=ProfilerConfig(memory_mode="off"))
+        p.start()
+        p.start_line(1, {"big": list(range(100))})
+        p.end_line(1)
+        p.stop()
+        stats = p.data.line_stats[1]
+        assert stats.memory_vars == 0
+        assert stats.memory_bytes == 0
+        assert p.data.peak_memory_bytes == 0
+
+    def test_memory_mode_deep_can_exceed_shallow(self) -> None:
+        env = {"x": [{"a": [1, 2, 3, 4, 5]}]}
+
+        shallow = Profiler(config=ProfilerConfig(memory_mode="shallow"))
+        shallow.start()
+        shallow.start_line(1, env)
+        shallow.end_line(1)
+        shallow.stop()
+
+        deep = Profiler(
+            config=ProfilerConfig(
+                memory_mode="deep",
+                deep_max_depth=5,
+                deep_max_items=200,
+            )
+        )
+        deep.start()
+        deep.start_line(1, env)
+        deep.end_line(1)
+        deep.stop()
+        assert (
+            deep.data.line_stats[1].memory_bytes
+            >= shallow.data.line_stats[1].memory_bytes
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,6 +911,12 @@ class TestProfilingDataToDict:
             "lines_profiled",
             "peak_memory_bytes",
             "complexity_estimate",
+            "complexity_method",
+            "complexity_confidence",
+            "sampled_lines",
+            "skipped_lines",
+            "line_sampling_rate",
+            "memory_mode",
         ]:
             assert key in d, f"Missing key: {key}"
 
@@ -897,28 +1057,58 @@ class TestProfileExecution:
     """Tests for the profile_execution() convenience wrapper."""
 
     def test_returns_tuple(self) -> None:
-        from optilang.profiler import Profiler
-        from optilang.executor import Executor
-        from optilang.lexer import tokenize
-        from optilang.parser import parse
+        def fake_executor(
+            code: str, profiler: Profiler, scale: int = 1
+        ) -> dict[str, object]:
+            profiler.start_line(1, {"x": 1})
+            profiler.end_line(1)
+            return {"code": code, "scale": scale}
 
-        profiler = Profiler()
-        tokens = tokenize("print(1 + 1)")
-        program = parse(tokens)
-        result = Executor(profiler=profiler).run(program)
-        profiling = profiler.get_data()
-        assert result is not None
-        assert profiling is not None
-
-    def test_profiling_data_type(self) -> None:
-        from optilang.profiler import Profiler, ProfilingData
-        from optilang.executor import Executor
-        from optilang.lexer import tokenize
-        from optilang.parser import parse
-
-        profiler = Profiler()
-        tokens = tokenize("x = 1")
-        program = parse(tokens)
-        Executor(profiler=profiler).run(program)
-        profiling = profiler.get_data()
+        result, profiling = profile_execution(fake_executor, "x = 1", scale=2)
+        assert isinstance(result, dict)
+        assert result["code"] == "x = 1"
+        assert result["scale"] == 2
         assert isinstance(profiling, ProfilingData)
+
+    def test_wrapper_collects_profiler_stats(self) -> None:
+        def fake_executor(code: str, profiler: Profiler) -> str:
+            profiler.start_function_call("inner", caller="outer")
+            profiler.start_line(2, {"code": code})
+            profiler.end_line(2)
+            profiler.end_function_call("inner")
+            return "ok"
+
+        result, profiling = profile_execution(fake_executor, "print(1)")
+        assert result == "ok"
+        assert profiling.total_lines_executed == 1
+        assert "inner" in profiling.function_stats
+        assert profiling.function_stats["inner"].call_count == 1
+
+
+class TestProfilerModuleScript:
+    """Tests for running profiler module as a script."""
+
+    def test_run_as_module_subprocess(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [sys.executable, "-m", "optilang.profiler"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert completed.returncode == 0
+        assert "PROFILING RESULTS" in completed.stdout
+        assert "SUMMARY:" in completed.stdout
+
+    def test_run_as_module_runpy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        profiler_path = repo_root / "optilang" / "profiler.py"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            runpy.run_path(str(profiler_path), run_name="__main__")
+        output = out.getvalue()
+        assert "PROFILING RESULTS" in output
+        assert "LINE STATS:" in output
+        assert "FUNCTION STATS:" in output
