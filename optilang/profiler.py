@@ -185,7 +185,7 @@ def _safe_getsizeof(value: Any) -> int:
     """Best-effort object size lookup with fallback."""
     try:
         return sys.getsizeof(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 28
 
 
@@ -287,7 +287,7 @@ def estimate_memory_bytes(
 
 
 def detect_complexity_with_confidence(
-    line_stats: Dict[int, LineStats]
+    line_stats: Dict[int, LineStats],
 ) -> Tuple[str, float]:
     """
     Return complexity class and heuristic confidence score.
@@ -423,13 +423,9 @@ class Profiler:
         self.data.total_lines_executed = sum(
             s.execution_count for s in self.data.line_stats.values()
         )
-        complexity, confidence = detect_complexity_with_confidence(
-            self.data.line_stats
-        )
+        complexity, confidence = detect_complexity_with_confidence(self.data.line_stats)
         sampling_rate = self.config.normalized_sampling_rate()
-        sampling_adjusted_confidence = confidence * (
-            0.5 + (0.5 * sampling_rate)
-        )
+        sampling_adjusted_confidence = confidence * (0.5 + (0.5 * sampling_rate))
         self.data.complexity_estimate = complexity
         self.data.complexity_method = "heuristic"
         self.data.complexity_confidence = max(
