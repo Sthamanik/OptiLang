@@ -114,7 +114,9 @@ class TestEstimateMemoryBytes:
 
         env = {"obj": Box()}
         shallow = estimate_memory_bytes(env, mode="shallow")
-        deep = estimate_memory_bytes(env, mode="deep", deep_max_depth=5, deep_max_items=100)
+        deep = estimate_memory_bytes(
+            env, mode="deep", deep_max_depth=5, deep_max_items=100
+        )
         assert deep >= shallow
 
 
@@ -628,9 +630,7 @@ class TestProfilerDirect:
         )
 
     def test_summary_includes_config_metadata(self) -> None:
-        p = Profiler(
-            config=ProfilerConfig(memory_mode="deep", line_sampling_rate=0.5)
-        )
+        p = Profiler(config=ProfilerConfig(memory_mode="deep", line_sampling_rate=0.5))
         p.start()
         p.start_line(1, {"x": [1, 2, 3]})
         p.end_line(1)
