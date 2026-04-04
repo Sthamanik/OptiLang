@@ -1455,8 +1455,7 @@ def calculate_full_score(
     )
 
     function_stats: Dict[str, Any] = cast(
-        Dict[str, Any],
-        profiling_data.get("function_stats") or {}
+        Dict[str, Any], profiling_data.get("function_stats") or {}
     )
 
     return DynamicScorer(
