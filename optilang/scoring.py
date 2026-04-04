@@ -1454,7 +1454,7 @@ def calculate_full_score(
         if line.strip() and not line.strip().startswith("#")
     )
 
-    function_stats = profiling_data.get("function_stats", {})
+    function_stats: Dict[str, Any] = profiling_data.get("function_stats") or {}
 
     return DynamicScorer(
         profiling_data=profiling_data,
