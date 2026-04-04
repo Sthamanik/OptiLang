@@ -31,8 +31,8 @@ from typing import Any, Optional, cast
 import pytest
 
 from optilang.models import Suggestion
-from optilang.scoring import (  # Public API; Internals under test; Constants
-    COMPLEXITY_BASE,
+from optilang.scoring import (
+    COMPLEXITY_BASE,  # ← new name
     DIMENSION_WEIGHTS,
     FUNCTION_LENGTH_THRESHOLD,
     GRADE_THRESHOLDS,
