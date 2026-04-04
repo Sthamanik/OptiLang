@@ -72,7 +72,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
 # ---------------------------------------------------------------------------
 # Program type
@@ -1454,7 +1454,10 @@ def calculate_full_score(
         if line.strip() and not line.strip().startswith("#")
     )
 
-    function_stats: Dict[str, Any] = profiling_data.get("function_stats") or {}
+    function_stats: Dict[str, Any] = cast(
+        Dict[str, Any],
+        profiling_data.get("function_stats") or {}
+    )
 
     return DynamicScorer(
         profiling_data=profiling_data,
