@@ -8,19 +8,24 @@ from __future__ import annotations
 from .executor import Executor, execute
 from .models import ExecutionResult, OptimizationReport, Suggestion
 from .parser import parse
-from .scoring import Scorer, ScoreReport, calculate_score
+from .scoring import (
+    DynamicScorer,
+    Scorer,
+    ScoreReport,
+    calculate_full_score,
+    calculate_score,
+)
 
 __version__ = "0.3.0"
 
 __all__ = [
-    # Core functions
     "execute",
     "parse",
     "calculate_score",
-    # Classes
+    "calculate_full_score",
     "Executor",
     "Scorer",
-    # Result models (useful for type hint)
+    "DynamicScorer",
     "ExecutionResult",
     "OptimizationReport",
     "Suggestion",
