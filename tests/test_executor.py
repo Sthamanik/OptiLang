@@ -11,8 +11,22 @@ Covers:
 from __future__ import annotations
 import pytest
 from optilang import execute
-from optilang.executor import Environment
+from optilang.ast_nodes import (
+    BinaryOpNode,
+    NumberNode,
+    PassNode,
+    ProgramNode,
+    UnaryOpNode,
+)
+from optilang.executor import Environment, Executor
+from optilang.lexer import tokenize
 from optilang.models import ExecutionResult
+from optilang.parser import parse
+from optilang.utils.errors import RuntimeError as OptiRuntimeError
+
+
+def _program(source: str) -> ProgramNode:
+    return parse(tokenize(source))
 
 
 #  Unit Tests: Environment
@@ -528,3 +542,122 @@ class TestExecuteProfilingIntegration:
         result = execute("items = [1, 2, 3, 4, 5]\ntotal = 0")
         assert result.profiling is not None
         assert result.profiling.peak_memory_bytes > 0
+
+
+class TestExecutorEdgeCases:
+    def test_recursion_limit_returns_runtime_error(self) -> None:
+        executor = Executor(enable_profiling=False)
+        executor.max_recursion_depth = 0
+
+        result = executor.run(_program("def f():\n    return f()\nf()"))
+
+        assert any("Maximum recursion depth (0) exceeded" in error for error in result.errors)
+
+    def test_run_wraps_unexpected_python_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        executor = Executor(enable_profiling=False)
+
+        def boom(program: ProgramNode) -> None:
+            raise Exception("boom")
+
+        monkeypatch.setattr(executor, "_execute_program", boom)
+
+        result = executor.run(ProgramNode(line=1, column=1, statements=[]))
+
+        assert result.errors == ["Runtime error: boom"]
+
+    def test_for_loop_over_non_iterable_returns_type_error(self) -> None:
+        result = execute("for i in 5:\n    print(i)")
+        assert "Object is not iterable" in result.errors[0]
+
+    def test_none_literal_executes(self) -> None:
+        result = execute("print(None)")
+        assert result.output == "None"
+
+    def test_unary_minus_invalid_operand_returns_error(self) -> None:
+        result = execute("print(-'x')")
+        assert "Invalid unary '-'" in result.errors[0]
+
+    def test_eval_rejects_unsupported_unary_operator(self) -> None:
+        executor = Executor(enable_profiling=False, timeout_seconds=0)
+        node = UnaryOpNode(
+            line=1,
+            column=1,
+            operator="~",
+            operand=NumberNode(line=1, column=2, value=1),
+        )
+
+        with pytest.raises(OptiRuntimeError, match="Unsupported unary operator"):
+            executor._eval(node, executor.globals)
+
+    def test_dict_literal_rejects_unhashable_key(self) -> None:
+        result = execute("data = {[1, 2]: 3}")
+        assert "Unhashable dictionary key" in result.errors[0]
+
+    def test_eval_rejects_unsupported_ast_node(self) -> None:
+        executor = Executor(enable_profiling=False, timeout_seconds=0)
+
+        with pytest.raises(OptiRuntimeError, match="Unsupported AST node: PassNode"):
+            executor._eval(PassNode(line=1, column=1), executor.globals)
+
+    def test_comparison_type_error_is_wrapped(self) -> None:
+        result = execute("print('a' >= 1)")
+        assert result.errors
+        assert "not supported" in result.errors[0]
+
+    def test_eval_binary_rejects_unknown_operator(self) -> None:
+        executor = Executor(enable_profiling=False, timeout_seconds=0)
+        node = BinaryOpNode(
+            line=1,
+            column=1,
+            left=NumberNode(line=1, column=1, value=1),
+            operator="@",
+            right=NumberNode(line=1, column=5, value=2),
+        )
+
+        with pytest.raises(OptiRuntimeError, match="Unsupported operator: @"):
+            executor._eval_binary(node, executor.globals)
+
+    def test_augmented_divide_by_zero_returns_error(self) -> None:
+        result = execute("x = 1\nx /= 0")
+        assert result.errors == ["Line 2: Division by zero"]
+
+    def test_apply_augmented_op_rejects_unknown_operator(self) -> None:
+        executor = Executor(enable_profiling=False)
+
+        with pytest.raises(OptiRuntimeError, match="Unsupported augmented operator: %="):
+            executor._apply_augmented_op(
+                "%=",
+                4,
+                2,
+                NumberNode(line=1, column=1, value=0),
+            )
+
+    def test_builtin_type_error_is_wrapped(self) -> None:
+        result = execute("print(len())")
+        assert "Invalid function call" in result.errors[0]
+
+    def test_builtin_value_error_is_wrapped(self) -> None:
+        result = execute("print(int('abc'))")
+        assert "invalid literal for int()" in result.errors[0]
+
+    def test_calling_non_callable_returns_error(self) -> None:
+        result = execute("x = 1\nx()")
+        assert result.errors == ["Line 2: Object is not callable"]
+
+    def test_sequence_index_requires_integer(self) -> None:
+        result = execute("items = [1]\nprint(items['0'])")
+        assert "Sequence index must be an integer" in result.errors[0]
+
+    def test_non_indexable_object_returns_error(self) -> None:
+        result = execute("x = 1\nprint(x[0])")
+        assert result.errors == ["Line 2: Object is not indexable"]
+
+    def test_symbol_table_serializes_builtins_when_requested(self) -> None:
+        executor = Executor(enable_profiling=False)
+
+        table = executor.get_symbol_table(include_builtins=True)
+
+        assert table["print"] == "<builtin _builtin_print>"
+        assert table["range"] == "<builtin range>"

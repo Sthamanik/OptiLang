@@ -27,6 +27,8 @@ from optilang.profiler import (
     ProfilingData,
     LineStats,
     FunctionStats,
+    _estimate_deep_object_size,
+    _safe_getsizeof,
     estimate_memory_bytes,
     detect_complexity,
     detect_complexity_with_confidence,
@@ -118,6 +120,46 @@ class TestEstimateMemoryBytes:
             env, mode="deep", deep_max_depth=5, deep_max_items=100
         )
         assert deep >= shallow
+
+    def test_safe_getsizeof_falls_back_on_type_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(value: object) -> int:
+            raise TypeError("boom")
+
+        monkeypatch.setattr("optilang.profiler.sys.getsizeof", boom)
+        assert _safe_getsizeof(object()) == 28
+
+    def test_deep_mode_handles_cycles(self) -> None:
+        cyclic: list[object] = []
+        cyclic.append(cyclic)
+        assert (
+            estimate_memory_bytes(
+                {"x": cyclic}, mode="deep", deep_max_depth=10, deep_max_items=10
+            )
+            > 0
+        )
+
+    def test_deep_mode_dict_budget_breaks_on_next_iteration(self) -> None:
+        env = {"x": {"a": 1, "b": 2}}
+        assert (
+            estimate_memory_bytes(
+                env, mode="deep", deep_max_depth=5, deep_max_items=2
+            )
+            > 0
+        )
+
+    def test_deep_mode_dict_budget_breaks_after_key_before_value(self) -> None:
+        assert _estimate_deep_object_size({"a": 1}, max_depth=5, max_items=1) > 0
+
+    def test_deep_mode_list_budget_breaks_on_next_iteration(self) -> None:
+        env = {"x": [1, 2, 3]}
+        assert (
+            estimate_memory_bytes(
+                env, mode="deep", deep_max_depth=5, deep_max_items=1
+            )
+            > 0
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1046,6 +1088,38 @@ class TestProfilerEdgeCases:
         stats = p.data.line_stats[1]
         assert stats.total_time_ms >= 0
         assert stats.min_time_ms >= 0
+
+    def test_end_line_recreates_missing_line_stats_entry(self) -> None:
+        p = Profiler()
+        p.start()
+        p._current_line_number = 7
+        p._current_line_sampled = False
+        p._current_line_start = None
+        p.data.line_stats.pop(7, None)
+
+        p.end_line(7)
+
+        assert p.data.line_stats[7].execution_count == 1
+
+    def test_end_line_with_missing_start_resets_state(self) -> None:
+        p = Profiler()
+        p.start()
+        p._current_line_number = 8
+        p._current_line_sampled = True
+        p._current_line_start = None
+
+        p.end_line(8)
+
+        assert p._current_line_number is None
+        assert p._current_line_sampled is False
+
+    def test_start_function_call_returns_immediately_when_disabled(self) -> None:
+        p = Profiler()
+        p.disable()
+
+        p.start_function_call("compute")
+
+        assert p.get_call_stack() == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import pytest
 
 from optilang.models import ExecutionResult, OptimizationReport, Suggestion
 from optilang.profiler import ProfilingData
+from optilang.token import Token, TokenType
 
 # ---------------------------------------------------------------------------
 # Unit Tests: ExecutionResult
@@ -255,3 +256,10 @@ class TestOptimizationReport:
         )
         assert sorted_s[0].pattern == "hot_loop"
         assert sorted_s[-1].pattern == "unused_vars"
+
+
+class TestTokenRepr:
+
+    def test_token_repr_includes_type_value_and_position(self) -> None:
+        token = Token(TokenType.NUMBER, 42, 3, 7)
+        assert repr(token) == "Token(TokenType.NUMBER, 42, 3:7)"

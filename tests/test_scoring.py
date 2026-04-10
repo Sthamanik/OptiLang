@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import optilang.scoring as scoring_module
 
 from optilang.scoring import (
     COMPLEXITY_POINTS,
@@ -47,8 +48,10 @@ from optilang.scoring import (
     Scorer,
     ScoreReport,
     _assign_grade,
+    _classify_linear_or_below,
     _detect_complexity,
     _generate_narrative,
+    _is_exponential,
     _lowest_dimension,
     calculate_score,
 )
@@ -301,6 +304,21 @@ class TestDetectComplexity:
         for cls in possible:
             assert cls in COMPLEXITY_POINTS, f"Missing: {cls}"
 
+    def test_exponential_branch_can_be_selected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stats = {"1": {"count": 10}, "2": {"count": 100}, "3": {"count": 100}}
+        monkeypatch.setattr(scoring_module, "_is_exponential", lambda max_c, n: True)
+        assert _detect_complexity(stats) == "O(2^n)"
+
+    def test_classify_linear_or_below_reaches_n_log_n_and_n_squared(self) -> None:
+        assert _classify_linear_or_below(40, 10) == "O(n log n)"
+        assert _classify_linear_or_below(100, 10) == "O(n²)"
+
+    def test_is_exponential_false_when_n_too_large_and_true_when_threshold_met(self) -> None:
+        assert _is_exponential(1_000_000, 61) is False
+        assert _is_exponential(1_000_000, 20) is True
+
 
 # ---------------------------------------------------------------------------
 # TestAssignGrade
@@ -338,6 +356,12 @@ class TestAssignGrade:
 
     def test_score_0_is_critical(self) -> None:
         assert _assign_grade(0.0) == "Critical"
+
+    def test_assign_grade_falls_back_when_thresholds_are_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scoring_module, "GRADE_THRESHOLDS", [])
+        assert _assign_grade(50.0) == "Critical"
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +718,29 @@ class TestScorerComputeCV:
     def test_cv_bands(self, counts: list[int], expected_sub: float) -> None:
         s = Scorer(make_profiling(counts), _empty_report())
         assert s._compute_efficiency_subscore() == expected_sub
+
+    def test_efficiency_subscore_has_cv_band_below_four(self) -> None:
+        s = Scorer(make_profiling([1, 1, 1, 1, 1, 100]), _empty_report())
+        assert s._compute_efficiency_subscore() == 4.0
+
+    def test_compute_cv_returns_zero_when_mean_is_zero_after_int_conversion(self) -> None:
+        class PositiveZero:
+            def __int__(self) -> int:
+                return 0
+
+            def __gt__(self, other: object) -> bool:
+                return True
+
+        s = Scorer(
+            {
+                "line_stats": {
+                    "1": {"count": PositiveZero()},
+                    "2": {"count": PositiveZero()},
+                }
+            },
+            _empty_report(),
+        )
+        assert s._compute_cv() == 0.0
 
 
 # ---------------------------------------------------------------------------

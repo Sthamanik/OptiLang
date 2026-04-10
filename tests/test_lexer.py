@@ -16,7 +16,7 @@ Tests cover:
 """
 
 import pytest
-from optilang.lexer import tokenize
+from optilang.lexer import Lexer, LexerState, tokenize
 from optilang.token import TokenType, Token
 from optilang.utils.errors import LexerError
 
@@ -583,3 +583,44 @@ class TestCompleteExpressions:
         assert types[0] == TokenType.LBRACE
         assert TokenType.COLON in types
         assert TokenType.RBRACE in types
+
+
+class TestLexerInternals:
+
+    def test_advance_returns_none_at_eof_and_increments_column(self) -> None:
+        lexer = Lexer("a")
+
+        assert lexer._advance() == "a"
+        assert lexer.column == 2
+        assert lexer._advance() is None
+
+    def test_invalid_indentation_level_raises_error(self) -> None:
+        with pytest.raises(LexerError, match="Invalid indentation level"):
+            tokenize("if True:\n        x = 1\n    y = 2\n")
+
+    def test_carriage_return_is_ignored(self) -> None:
+        tokens = tokenize("x = 1\ry = 2")
+        values = [token.value for token in tokens if token.type == TokenType.IDENTIFIER]
+        assert values == ["x", "y"]
+
+    def test_transition_rejects_unknown_state(self) -> None:
+        lexer = Lexer("")
+        with pytest.raises(LexerError, match="undefined state"):
+            lexer._transition("BROKEN", None)  # type: ignore[arg-type]
+
+    def test_tokenize_raises_if_dfa_enters_error_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lexer = Lexer("x")
+
+        def enter_error(state: LexerState, ch: str | None) -> LexerState:
+            return LexerState.ERROR
+
+        monkeypatch.setattr(lexer, "_transition", enter_error)
+
+        with pytest.raises(LexerError, match="DFA entered ERROR state"):
+            lexer.tokenize()
+
+    def test_tokenize_to_string_returns_repr_lines(self) -> None:
+        rendered = Lexer("42").tokenize_to_string()
+        assert "Token(TokenType.NUMBER, 42, 1:1)" in rendered

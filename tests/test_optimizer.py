@@ -6,15 +6,40 @@ Additional tests covering every branch and condition in optimizer.py.
 
 from __future__ import annotations
 
+import builtins
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 import pytest
 
-from optilang.ast_nodes import ProgramNode
+from optilang.ast_nodes import (
+    AssignmentNode,
+    BinaryOpNode,
+    BooleanNode,
+    DictNode,
+    ForNode,
+    FunctionCallNode,
+    IdentifierNode,
+    NullNode,
+    NumberNode,
+    PassNode,
+    ProgramNode,
+    StringNode,
+)
 from optilang.executor import execute
 from optilang.lexer import tokenize
-from optilang.models import Suggestion
+from optilang.models import OptimizationReport, Suggestion
 from optilang.optimizer import (
+    _UNRESOLVED,
+    _build_const_map,
+    _fold,
+    _fp,
+    _innermost_count,
+    _repr_node,
+    _resolve,
+    _walk,
+    Optimizer,
+    analyze,
+    analyze_source,
     detect_constant_folding,
     detect_dead_code,
     detect_early_return,
@@ -27,7 +52,7 @@ from optilang.optimizer import (
     detect_unused_vars,
 )
 from optilang.parser import parse
-from optilang.profiler import ProfilingData
+from optilang.profiler import FunctionStats, LineStats, ProfilingData
 
 
 # Shared helpers
@@ -48,6 +73,14 @@ def _detect(
 ) -> List[Suggestion]:
     ast, profiling, symbol_table = _run(source)
     return detector(ast, profiling, symbol_table)
+
+
+def _line_stats(line: int, count: int) -> LineStats:
+    stats = LineStats(line_number=line)
+    stats.execution_count = count
+    stats.total_time_ms = float(count)
+    stats.avg_time_ms = float(count)
+    return stats
 
 
 # Pattern 1 — Unused variables (3 new cases)
@@ -565,3 +598,433 @@ class TestExpensiveCallsExtended:
         suggestions = detect_expensive_calls(ast, profiling=profiler.get_data())
         # ghost() does not appear anywhere in the AST — no suggestions
         assert suggestions == []
+
+
+class TestOptimizerHelpers:
+
+    def test_walk_visits_tuple_entries(self) -> None:
+        ast = ProgramNode(
+            1,
+            1,
+            statements=[
+                AssignmentNode(
+                    1,
+                    1,
+                    target=IdentifierNode(1, 1, "mapping"),
+                    value=DictNode(
+                        1,
+                        11,
+                        pairs=[(StringNode(1, 12, "k"), IdentifierNode(1, 18, "value"))],
+                    ),
+                )
+            ],
+        )
+
+        names = [node.name for node in _walk(ast) if isinstance(node, IdentifierNode)]
+        assert "mapping" in names
+        assert "value" in names
+
+    def test_unused_vars_without_symbol_table_excludes_loop_vars_and_params(
+        self,
+    ) -> None:
+        ast = _parse(
+            "for i in range(3):\n"
+            "    pass\n"
+            "def echo(value):\n"
+            "    return value\n"
+            "x = 1\n"
+        )
+
+        suggestions = detect_unused_vars(ast, profiling=None, symbol_table=None)
+
+        assert len(suggestions) == 1
+        assert suggestions[0].pattern == "unused_vars"
+        assert "x" in suggestions[0].description
+
+    def test_build_const_map_handles_none_augmented_assignments_and_symbol_table(
+        self,
+    ) -> None:
+        ast = _parse("missing = None\ncount = 1\ncount += 2\nlabel = 'ok'\n")
+
+        assert _build_const_map(ast, symbol_table=None) == {
+            "missing": None,
+            "label": "ok",
+        }
+
+        matched_ast = _parse("size = 5\n")
+        assert _build_const_map(matched_ast, symbol_table={"size": 5}) == {"size": 5}
+        assert _build_const_map(matched_ast, symbol_table={"size": 6}) == {}
+
+    def test_constant_resolution_representation_and_folding_helpers(self) -> None:
+        assert _resolve(NullNode(1, 1), {}) is None
+        assert _resolve(PassNode(1, 1), {}) is _UNRESOLVED
+
+        assert _repr_node(StringNode(1, 1, "hi"), {}) == "'hi'"
+        assert _repr_node(IdentifierNode(1, 1, "n"), {"n": 2}) == "n(2)"
+        assert _repr_node(IdentifierNode(1, 1, "n"), {}) == "n"
+
+        assert _fold("*", 3, 4) == 12
+        assert _fold("/", 8, 2) == 4
+        assert _fold("/", 8, 0) is None
+        assert _fold("??", 1, 2) is None
+
+    def test_constant_folding_skips_invalid_operations(self) -> None:
+        suggestions = detect_constant_folding(_parse('x = "a" - "b"\n'))
+        assert suggestions == []
+
+    def test_constant_folding_skips_none_results(self) -> None:
+        assert detect_constant_folding(_parse("x = 1 / 0\n")) == []
+
+    def test_detect_early_return_positive_case(self) -> None:
+        ast = _parse(
+            "def choose(x):\n"
+            "    if x > 0:\n"
+            "        return x\n"
+            "    else:\n"
+            "        return 0\n"
+        )
+
+        suggestions = detect_early_return(ast)
+
+        assert len(suggestions) == 1
+        assert suggestions[0].pattern == "early_return"
+
+    def test_detect_early_return_rejects_non_matching_shapes(self) -> None:
+        sources = [
+            "def choose(x):\n"
+            "    if x > 0:\n"
+            "        return x\n"
+            "    else:\n"
+            "        return 0\n"
+            "    print(x)\n",
+            "def choose(x):\n"
+            "    if x > 0:\n"
+            "        return x\n",
+            "def choose(x):\n"
+            "    if x > 0:\n"
+            "        return x\n"
+            "    else:\n"
+            "        y = 0\n",
+        ]
+
+        for source in sources:
+            assert detect_early_return(_parse(source)) == []
+
+    def test_loop_invariant_skips_literals_function_calls_and_low_counts(self) -> None:
+        ast = _parse(
+            "n = 3\n"
+            "for i in range(n):\n"
+            "    literal = 10\n"
+            "    rendered = str(i)\n"
+        )
+        assert detect_loop_invariant(ast, profiling=None, symbol_table=None) == []
+
+        ast = _parse(
+            "n = 3\n"
+            "for i in range(n):\n"
+            "    limit = n * 2\n"
+            "    print(limit)\n"
+        )
+        profiling = ProfilingData(line_stats={3: _line_stats(3, 3)})
+        assert detect_loop_invariant(ast, profiling=profiling, symbol_table=None) == []
+
+    def test_string_concat_skips_non_strings_and_scales_severity_and_recurses(
+        self,
+    ) -> None:
+        non_string = _parse("total = 0\nfor i in range(5):\n    total += i\n")
+        assert detect_string_concat(non_string, profiling=None, symbol_table=None) == []
+
+        low = _parse('result = ""\nfor i in range(3):\n    result += "x"\n')
+        low_profiling = ProfilingData(line_stats={3: _line_stats(3, 3)})
+        assert detect_string_concat(low, low_profiling, {"result": ""})[0].severity == "low"
+
+        high = _parse('result = ""\nfor i in range(600):\n    result += "x"\n')
+        high_profiling = ProfilingData(line_stats={3: _line_stats(3, 600)})
+        assert (
+            detect_string_concat(high, high_profiling, {"result": ""})[0].severity
+            == "high"
+        )
+
+        nested = _parse(
+            'result = ""\n'
+            "for i in range(2):\n"
+            "    j = 0\n"
+            "    while j < 2:\n"
+            '        result += "x"\n'
+            "        j = j + 1\n"
+        )
+        nested_profiling = ProfilingData(line_stats={5: _line_stats(5, 4)})
+        suggestions = detect_string_concat(nested, nested_profiling, {"result": ""})
+        assert any(s.line == 5 for s in suggestions)
+
+    def test_innermost_count_and_hot_loop_edge_cases(self) -> None:
+        ast = _parse(
+            "for i in range(2):\n"
+            "    for j in range(2):\n"
+            "        x = i + j\n"
+        )
+        outer = ast.statements[0]
+        assert isinstance(outer, ForNode)
+
+        profiling = ProfilingData(line_stats={3: _line_stats(3, 4)})
+        assert _innermost_count(outer, profiling) == 4
+        assert _innermost_count(outer, profiling=None) == 0
+
+        empty_body_ast = ProgramNode(
+            1,
+            1,
+            statements=[
+                ForNode(
+                    1,
+                    1,
+                    iterator=IdentifierNode(1, 5, "i"),
+                    iterable=IdentifierNode(1, 10, "items"),
+                    body=[],
+                )
+            ],
+        )
+        counts_only = ProfilingData(line_stats={10: _line_stats(10, 2)})
+        assert detect_hot_loops(empty_body_ast, profiling=counts_only) == []
+
+        cool_loop_ast = ProgramNode(
+            1,
+            1,
+            statements=[
+                ForNode(
+                    1,
+                    1,
+                    iterator=IdentifierNode(1, 5, "i"),
+                    iterable=IdentifierNode(1, 10, "items"),
+                    body=[
+                        AssignmentNode(
+                            2,
+                            5,
+                            target=IdentifierNode(2, 5, "x"),
+                            value=NumberNode(2, 9, 1),
+                        )
+                    ],
+                )
+            ],
+        )
+        cool_profiling = ProfilingData(
+            line_stats={2: _line_stats(2, 100), 20: _line_stats(20, 100)}
+        )
+        assert detect_hot_loops(cool_loop_ast, profiling=None) == []
+        assert detect_hot_loops(cool_loop_ast, profiling=cool_profiling) == []
+
+    def test_triple_nested_loops_are_high_severity(self) -> None:
+        ast = _parse(
+            "for i in range(2):\n"
+            "    for j in range(2):\n"
+            "        while j < 1:\n"
+            "            j += 1\n"
+        )
+
+        suggestions = detect_nested_loops(ast, profiling=None, symbol_table=None)
+
+        assert any(s.severity == "high" for s in suggestions)
+
+    def test_repeated_computation_respects_same_line_writes_and_count_gate(
+        self,
+    ) -> None:
+        same_line_ast = ProgramNode(
+            1,
+            1,
+            statements=[
+                AssignmentNode(
+                    1,
+                    1,
+                    target=IdentifierNode(1, 1, "a"),
+                    value=BinaryOpNode(
+                        2,
+                        5,
+                        left=IdentifierNode(2, 5, "n"),
+                        operator="+",
+                        right=NumberNode(2, 9, 1),
+                    ),
+                ),
+                AssignmentNode(
+                    1,
+                    10,
+                    target=IdentifierNode(1, 10, "b"),
+                    value=BinaryOpNode(
+                        2,
+                        15,
+                        left=IdentifierNode(2, 15, "n"),
+                        operator="+",
+                        right=NumberNode(2, 19, 1),
+                    ),
+                ),
+            ],
+        )
+        assert detect_repeated_computation(same_line_ast) == []
+
+        with_intervening_write = _parse(
+            "n = 1\n"
+            "a = n * 2\n"
+            "n = 3\n"
+            "b = n * 2\n"
+        )
+        assert detect_repeated_computation(with_intervening_write) == []
+
+        gated = _parse("n = 1\nx = n * 2\ny = n * 2\n")
+        low_counts = ProfilingData(
+            line_stats={2: _line_stats(2, 1), 3: _line_stats(3, 1)}
+        )
+        assert detect_repeated_computation(gated, profiling=low_counts) == []
+
+        assert _fp(StringNode(1, 1, "hi")) == "'hi'"
+        assert _fp(BooleanNode(1, 1, True)) == "True"
+        assert _fp(PassNode(1, 1)) == "?"
+
+    def test_repeated_computation_skips_already_reported_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_ast = ProgramNode(line=1, column=1, statements=[])
+        fake_nodes = [
+            NumberNode(line=2, column=1, value=1),
+            NumberNode(line=3, column=1, value=1),
+            NumberNode(line=2, column=1, value=1),
+            NumberNode(line=3, column=1, value=1),
+        ]
+        original_sorted = builtins.sorted
+
+        def fake_walk(node: object):
+            if node is fake_ast:
+                yield from fake_nodes
+            else:
+                return
+                yield
+
+        def fake_sorted(iterable: object, *args: object, **kwargs: object):
+            items = list(iterable)
+            if items and all(isinstance(item, tuple) and len(item) == 2 for item in items):
+                return items
+            return original_sorted(items, *args, **kwargs)
+
+        monkeypatch.setattr("optilang.optimizer._walk", fake_walk)
+        monkeypatch.setattr("optilang.optimizer._nontrivial", lambda node: True)
+        monkeypatch.setattr("optilang.optimizer._fp", lambda node: "same")
+        monkeypatch.setattr(builtins, "sorted", fake_sorted)
+
+        suggestions = detect_repeated_computation(
+            fake_ast, profiling=None, symbol_table=None
+        )
+
+        assert suggestions
+
+    def test_expensive_calls_handles_empty_non_expensive_and_duplicate_sites(
+        self,
+    ) -> None:
+        ast = _parse("x = 1\n")
+        assert detect_expensive_calls(ast, profiling=None) == []
+
+        plain_call_ast = _parse("print(1)\n")
+        not_expensive = ProfilingData(
+            function_stats={
+                "print": FunctionStats(
+                    name="print",
+                    call_count=2,
+                    avg_time_ms=0.1,
+                    total_time_ms=0.2,
+                )
+            }
+        )
+        assert detect_expensive_calls(plain_call_ast, profiling=not_expensive) == []
+
+        duplicate_site_ast = ProgramNode(
+            1,
+            1,
+            statements=[
+                ForNode(
+                    1,
+                    1,
+                    iterator=IdentifierNode(1, 5, "i"),
+                    iterable=IdentifierNode(1, 10, "items"),
+                    body=[
+                        AssignmentNode(
+                            3,
+                            5,
+                            target=IdentifierNode(3, 5, "a"),
+                            value=FunctionCallNode(
+                                3,
+                                9,
+                                function=IdentifierNode(3, 9, "slow"),
+                                arguments=[IdentifierNode(3, 14, "i")],
+                            ),
+                        ),
+                        AssignmentNode(
+                            3,
+                            20,
+                            target=IdentifierNode(3, 20, "b"),
+                            value=FunctionCallNode(
+                                3,
+                                24,
+                                function=IdentifierNode(3, 24, "slow"),
+                                arguments=[IdentifierNode(3, 29, "i")],
+                            ),
+                        ),
+                    ],
+                )
+            ],
+        )
+        expensive = ProfilingData(
+            function_stats={
+                "slow": FunctionStats(
+                    name="slow",
+                    call_count=10,
+                    avg_time_ms=5.0,
+                    total_time_ms=50.0,
+                )
+            }
+        )
+        suggestions = detect_expensive_calls(duplicate_site_ast, profiling=expensive)
+        assert len(suggestions) == 1
+        assert suggestions[0].severity == "high"
+
+    def test_optimizer_run_wrappers_and_exception_isolation(self) -> None:
+        ast = _parse("x = 1\n")
+        default_optimizer = Optimizer(ast)
+        assert default_optimizer._ast is ast
+        assert default_optimizer._profiling is None
+        assert default_optimizer._symbol_table is None
+        assert len(default_optimizer._detectors) > 0
+
+        def broken_detector(*args: object) -> list[Suggestion]:
+            raise RuntimeError("boom")
+
+        def low_detector(*args: object) -> list[Suggestion]:
+            return [
+                Suggestion(
+                    line=1,
+                    pattern="low",
+                    severity="low",
+                    description="low impact",
+                    suggestion="noop",
+                    impact_score=1.0,
+                )
+            ]
+
+        def high_detector(*args: object) -> list[Suggestion]:
+            return [
+                Suggestion(
+                    line=1,
+                    pattern="high",
+                    severity="high",
+                    description="high impact",
+                    suggestion="noop",
+                    impact_score=9.0,
+                )
+            ]
+
+        report = Optimizer(
+            ast, detectors=[broken_detector, low_detector, high_detector]
+        ).run()
+        assert [s.pattern for s in report.suggestions] == ["high", "low"]
+
+        analyzed = analyze(ast)
+        assert isinstance(analyzed, OptimizationReport)
+
+        source_report = analyze_source("x = 1\n")
+        assert isinstance(source_report, OptimizationReport)
+        assert any(s.pattern == "unused_vars" for s in source_report.suggestions)

@@ -16,7 +16,8 @@ Tests cover:
 
 import pytest
 from optilang.lexer import tokenize
-from optilang.parser import parse
+from optilang.parser import Parser, parse
+from optilang.token import Token, TokenType
 from optilang.ast_nodes import (
     ProgramNode,
     NumberNode,
@@ -836,3 +837,109 @@ class TestNodeMetadata:
         source = "def foo():\n    pass"
         node = first_stmt(source)
         assert node.line == 1
+
+
+class TestParserInternals:
+
+    def test_peek_out_of_bounds_returns_none(self) -> None:
+        parser = Parser(tokenize("x"))
+        assert parser.peek(10) is None
+
+    def test_advance_past_end_of_file_raises(self) -> None:
+        parser = Parser([])
+        with pytest.raises(ParserError, match="Cannot advance past end of file"):
+            parser.advance()
+
+    def test_expect_reaches_end_of_file_when_current_token_is_none(self) -> None:
+        parser = Parser([])
+        with pytest.raises(ParserError, match="reached end of file"):
+            parser.expect(TokenType.NUMBER)
+
+    def test_match_returns_false_when_current_token_is_none(self) -> None:
+        assert Parser([]).match(TokenType.NUMBER) is False
+
+    def test_parse_wraps_unexpected_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        parser = Parser(tokenize("x = 1"))
+
+        def boom() -> list[ASTNode]:
+            raise ValueError("boom")
+
+        monkeypatch.setattr(parser, "parse_statements", boom)
+
+        with pytest.raises(ParserError, match="Unexpected error during parsing: boom"):
+            parser.parse()
+
+    def test_parse_statements_skips_blank_lines(self) -> None:
+        tree = parse_source("x = 1\n\n\ny = 2\n")
+        assert len(tree.statements) == 2
+
+    def test_parse_statements_skips_newline_after_none_statement(self) -> None:
+        parser = Parser(
+            [
+                Token(TokenType.NEWLINE, None, 1, 1),
+                Token(TokenType.IDENTIFIER, "x", 2, 1),
+                Token(TokenType.EOF, None, 2, 2),
+            ]
+        )
+        parser.skip_newlines = lambda: None  # type: ignore[method-assign]
+
+        def fake_parse_statement() -> ASTNode:
+            parser.current_token = parser.tokens[2]
+            return NumberNode(line=2, column=1, value=1)
+
+        parser.parse_statement = fake_parse_statement  # type: ignore[method-assign]
+
+        statements = parser.parse_statements()
+
+        assert len(statements) == 1
+        assert isinstance(statements[0], NumberNode)
+
+    def test_augmented_assignment_operator_missing_at_end_of_file(self) -> None:
+        parser = Parser([Token(TokenType.IDENTIFIER, "x", 1, 1)])
+        with pytest.raises(
+            ParserError,
+            match="augmented assignment operator but reached end of file",
+        ):
+            parser.parse_augmented_assignment()
+
+    def test_augmented_assignment_operator_rejects_non_augmented_token(self) -> None:
+        parser = Parser(
+            [
+                Token(TokenType.IDENTIFIER, "x", 1, 1),
+                Token(TokenType.ASSIGN, "=", 1, 3),
+                Token(TokenType.NUMBER, 1, 1, 5),
+                Token(TokenType.EOF, None, 1, 6),
+            ]
+        )
+
+        with pytest.raises(ParserError, match="Expected augmented assignment operator"):
+            parser.parse_augmented_assignment()
+
+    def test_parse_unary_none_operator_branch_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parser = Parser([])
+        monkeypatch.setattr(parser, "match", lambda *args: True)
+        parser.current_token = None
+
+        with pytest.raises(ParserError, match="Expected unary operator but got None"):
+            parser.parse_unary()
+
+    def test_none_literal_can_be_used_in_postfix_expression(self) -> None:
+        node = first_expr("None[0]")
+        assert isinstance(node, IndexNode)
+        assert isinstance(node.collection, NullNode)
+
+    def test_unexpected_token_in_expression_raises(self) -> None:
+        with pytest.raises(ParserError, match="Unexpected token in expression"):
+            parse_source("]")
+
+    def test_list_literal_allows_trailing_comma(self) -> None:
+        node = first_expr("[1, 2,]")
+        assert isinstance(node, ListNode)
+        assert len(node.elements) == 2
+
+    def test_dict_literal_allows_trailing_comma(self) -> None:
+        node = first_expr("{'a': 1,}")
+        assert isinstance(node, DictNode)
+        assert len(node.pairs) == 1
