@@ -7,27 +7,27 @@ from __future__ import annotations
 
 from .executor import Executor, execute
 from .models import ExecutionResult, OptimizationReport, Suggestion
+from .optimizer import Optimizer, analyze, analyze_source
 from .parser import parse
-from .scoring import (
-    DynamicScorer,
-    Scorer,
-    ScoreReport,
-    calculate_full_score,
-    calculate_score,
-)
+from .scoring import DimensionScores, Scorer, ScoreReport, calculate_score
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
+    # Core functions
     "execute",
     "parse",
     "calculate_score",
-    "calculate_full_score",
+    "analyze",
+    "analyze_source",
+    # Classes
     "Executor",
+    "Optimizer",
     "Scorer",
-    "DynamicScorer",
+    # Result models (useful for type hints)
     "ExecutionResult",
     "OptimizationReport",
     "Suggestion",
     "ScoreReport",
+    "DimensionScores",
 ]

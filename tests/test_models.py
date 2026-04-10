@@ -1,17 +1,29 @@
 """
-Tests for OptiLang data models (Sprint 2)
+Tests for OptiLang data models (Sprint 2 — updated for v0.4.0)
+
+Changes from previous version:
+    OptimizationReport no longer carries scoring fields.
+    The following fields were removed in v0.4.0:
+        - optimization_score   (moved to ScoreReport.score)
+        - score_breakdown      (moved to ScoreReport.dimensions)
+        - complexity_analysis  (moved to ScoreReport.complexity_class)
 
 Covers:
-- ExecutionResult: fields, defaults, profiling integration
-- Suggestion: fields and severity values
-- OptimizationReport: defaults and structure
+    - ExecutionResult: fields, defaults, profiling integration
+    - Suggestion: fields and severity values
+    - OptimizationReport: only holds suggestions; removed fields are absent
 """
 
 from __future__ import annotations
+
+import pytest
+
 from optilang.models import ExecutionResult, OptimizationReport, Suggestion
 from optilang.profiler import ProfilingData
 
-#  Unit Tests: ExecutionResult
+# ---------------------------------------------------------------------------
+# Unit Tests: ExecutionResult
+# ---------------------------------------------------------------------------
 
 
 class TestExecutionResult:
@@ -57,7 +69,7 @@ class TestExecutionResult:
         assert isinstance(result.profiling, ProfilingData)
 
     def test_errors_list_is_independent(self) -> None:
-        # Two instances should not share the same errors list
+        # Two instances must not share the same errors list
         r1 = ExecutionResult(output="")
         r2 = ExecutionResult(output="")
         r1.errors.append("error")
@@ -70,7 +82,9 @@ class TestExecutionResult:
         assert "x" not in r2.symbol_table
 
 
-#  Unit Tests: Suggestion
+# ---------------------------------------------------------------------------
+# Unit Tests: Suggestion
+# ---------------------------------------------------------------------------
 
 
 class TestSuggestion:
@@ -108,29 +122,74 @@ class TestSuggestion:
         assert isinstance(s.impact_score, float)
 
 
-#  Unit Tests: OptimizationReport
+# ---------------------------------------------------------------------------
+# Unit Tests: OptimizationReport
+# ---------------------------------------------------------------------------
 
 
 class TestOptimizationReport:
-    """Tests for the OptimizationReport dataclass."""
+    """
+    Tests for the OptimizationReport dataclass.
+
+    As of v0.4.0, OptimizationReport only holds a list of Suggestion objects.
+    Scoring data (score, breakdown, complexity) lives in ScoreReport.
+    """
+
+    # ── Structure ────────────────────────────────────────────────────────
 
     def test_default_suggestions_empty(self) -> None:
         report = OptimizationReport()
         assert report.suggestions == []
 
-    def test_default_score_100(self) -> None:
-        report = OptimizationReport()
-        assert report.optimization_score == 100.0
+    def test_suggestions_list_is_independent(self) -> None:
+        # Two instances must not share the same suggestions list
+        r1 = OptimizationReport()
+        r2 = OptimizationReport()
+        r1.suggestions.append(Suggestion(1, "p", "low", "d", "s", 1.0))
+        assert r2.suggestions == []
 
-    def test_default_breakdown_empty(self) -> None:
+    def test_only_field_is_suggestions(self) -> None:
+        # OptimizationReport must expose exactly one public data field
         report = OptimizationReport()
-        assert report.score_breakdown == {}
+        fields = [f for f in vars(report) if not f.startswith("_")]
+        assert fields == ["suggestions"]
 
-    def test_default_complexity_analysis_empty(self) -> None:
+    # ── Removed fields are gone ───────────────────────────────────────────
+
+    def test_optimization_score_field_does_not_exist(self) -> None:
         report = OptimizationReport()
-        assert report.complexity_analysis == {}
+        assert not hasattr(
+            report, "optimization_score"
+        ), "use ScoreReport.score"
 
-    def test_with_suggestions(self) -> None:
+    def test_score_breakdown_field_does_not_exist(self) -> None:
+        report = OptimizationReport()
+        assert not hasattr(
+            report, "score_breakdown"
+        ), "use ScoreReport.dimensions"
+
+    def test_complexity_analysis_field_does_not_exist(self) -> None:
+        report = OptimizationReport()
+        assert not hasattr(
+            report, "complexity_analysis"
+        ), "use ScoreReport.complexity_class"
+
+    def test_constructor_rejects_optimization_score_kwarg(self) -> None:
+        with pytest.raises(TypeError):
+            OptimizationReport(optimization_score=95.0)  # type: ignore[call-arg]
+
+    def test_constructor_rejects_score_breakdown_kwarg(self) -> None:
+        with pytest.raises(TypeError):
+            OptimizationReport(score_breakdown={"x": 1.0})  # type: ignore[call-arg]
+
+    def test_constructor_rejects_complexity_analysis_kwarg(self) -> None:
+        with pytest.raises(TypeError):
+            OptimizationReport(
+                complexity_analysis={"class": "O(n)"})  # type: ignore[call-arg]
+
+    # ── Suggestions behaviour ─────────────────────────────────────────────
+
+    def test_with_single_suggestion(self) -> None:
         s = Suggestion(
             line=1,
             pattern="unused_vars",
@@ -139,18 +198,60 @@ class TestOptimizationReport:
             suggestion="Remove it",
             impact_score=2.0,
         )
-        report = OptimizationReport(suggestions=[s], optimization_score=95.0)
+        report = OptimizationReport(suggestions=[s])
         assert len(report.suggestions) == 1
-        assert report.optimization_score == 95.0
+        assert report.suggestions[0].pattern == "unused_vars"
 
-    def test_with_score_breakdown(self) -> None:
-        report = OptimizationReport(
-            score_breakdown={"severity_penalty": 2.0, "complexity_penalty": 3.0}
+    def test_with_multiple_suggestions(self) -> None:
+        suggestions = [
+            Suggestion(1, "hot_loop", "high", "d", "s", 18.0),
+            Suggestion(2, "dead_code", "medium", "d", "s", 7.0),
+            Suggestion(3, "unused_vars", "low", "d", "s", 3.0),
+        ]
+        report = OptimizationReport(suggestions=suggestions)
+        assert len(report.suggestions) == 3
+
+    def test_suggestions_preserve_order(self) -> None:
+        suggestions = [
+            Suggestion(3, "hot_loop", "high", "d", "s", 18.0),
+            Suggestion(1, "unused_vars", "low", "d", "s", 3.0),
+            Suggestion(2, "dead_code", "medium", "d", "s", 7.0),
+        ]
+        report = OptimizationReport(suggestions=suggestions)
+        assert [s.line for s in report.suggestions] == [3, 1, 2]
+
+    def test_suggestions_severity_values(self) -> None:
+        for severity in ("low", "medium", "high"):
+            s = Suggestion(1, "p", severity, "d", "s", 1.0)
+            report = OptimizationReport(suggestions=[s])
+            assert report.suggestions[0].severity == severity
+
+    def test_append_suggestion_after_construction(self) -> None:
+        report = OptimizationReport()
+        report.suggestions.append(Suggestion(5, "nested_loops", "high", "d", "s", 12.0))
+        assert len(report.suggestions) == 1
+        assert report.suggestions[0].pattern == "nested_loops"
+
+    def test_suggestions_can_be_filtered_by_severity(self) -> None:
+        suggestions = [
+            Suggestion(1, "hot_loop", "high", "d", "s", 18.0),
+            Suggestion(2, "dead_code", "medium", "d", "s", 7.0),
+            Suggestion(3, "unused_vars", "low", "d", "s", 3.0),
+        ]
+        report = OptimizationReport(suggestions=suggestions)
+        high_only = [s for s in report.suggestions if s.severity == "high"]
+        assert len(high_only) == 1
+        assert high_only[0].pattern == "hot_loop"
+
+    def test_suggestions_can_be_sorted_by_impact_score(self) -> None:
+        suggestions = [
+            Suggestion(3, "unused_vars", "low", "d", "s", 3.0),
+            Suggestion(1, "hot_loop", "high", "d", "s", 18.0),
+            Suggestion(2, "dead_code", "medium", "d", "s", 7.0),
+        ]
+        report = OptimizationReport(suggestions=suggestions)
+        sorted_s = sorted(
+            report.suggestions, key=lambda s: s.impact_score, reverse=True
         )
-        assert report.score_breakdown["severity_penalty"] == 2.0
-
-    def test_suggestions_list_is_independent(self) -> None:
-        r1 = OptimizationReport()
-        r2 = OptimizationReport()
-        r1.suggestions.append(Suggestion(1, "p", "low", "d", "s", 1.0))
-        assert r2.suggestions == []
+        assert sorted_s[0].pattern == "hot_loop"
+        assert sorted_s[-1].pattern == "unused_vars"

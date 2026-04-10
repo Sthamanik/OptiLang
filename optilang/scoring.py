@@ -1,192 +1,136 @@
 """
 optilang/scoring.py
 -------------------
-OptiLang Intelligent Scoring System  (v2.0)
+Scoring system for OptiLang.
 
-WHAT THIS SCORE MEANS
-=====================
-The score is not a checklist of penalties. It is an earned measure of how
-well a program is written *relative to what it is trying to do*.
+Calculates an overall optimization score (0–100) across four dimensions:
 
-A score of 85 for a recursive Fibonacci program means something different
-from a score of 85 for a nested-loop matrix processor — and that is by
-design. The system first understands the program, then judges it on its
-own terms.
+    Dimension               Max     Source
+    ─────────────────────────────────────────────────────────────────
+    Correctness              35     result.errors
+    Efficiency + Complexity  30     profiling.line_stats
+    Quality                  20     optimizer suggestions (runtime patterns)
+    Maintainability          15     optimizer suggestions (style patterns)
+    ─────────────────────────────────────────────────────────────────
+    Total                   100
 
-The score reflects two fundamental qualities a programmer should aim for:
+Design principles:
+    - Score-earned model: each dimension contributes positively (not penalty-based).
+    - Dynamic scoring: calculations are relative to the program being analysed,
+      not fixed global thresholds. A 5-line program and a 50-line program are
+      judged on their own terms.
+    - Graceful degradation: if profiling or optimizer data is unavailable,
+      partial credit (50 % of max) is awarded for that dimension rather than
+      zero, reflecting genuine uncertainty rather than failure.
 
-    Efficiency   — does the program use computation and memory well?
-    Quality      — is the code clean, intentional, and well-structured?
+Dimension breakdown:
 
-Both qualities are measured relative to the program's own execution data,
-so a loop that ran 5 times is never penalised the same as one that ran
-5 million times.
+    Correctness (0–35)
+        Derived directly from result.errors. No algorithm needed.
+        0 errors → 35 | 1 error → 10 | 2+ errors → 0
 
-FOUR-STAGE PIPELINE
-===================
-Stage 1 — ProgramProfiler
-    Reads the AST, execution trace, and optimizer suggestions to build
-    a ProgramProfile describing *what kind of program this is*.
+    Efficiency + Complexity (0–30), two equal sub-scores:
 
-Stage 2 — DimensionScorer
-    Scores each of six sub-dimensions on a 0–100 scale:
-        Efficiency group (max 100 each):
-            E1  Execution Efficiency    — wasted vs. useful work
-            E2  Memory Efficiency       — adaptive pressure threshold
-        Quality group (max 100 each):
-            Q1  Code Cleanliness        — dead code, function length,
-                                          nesting depth, branch density
-            Q2  Issue Density           — hotness-weighted suggestions
-        Cross-cutting:
-            C1  Complexity Handling     — class × scale × confidence
-            C2  Structure               — overall code organisation score
+        Complexity sub-score (0–15)
+            Reuses the existing _detect_complexity() heuristic which reads
+            execution counts from profiling.line_stats and returns a standard
+            Big-O class string. That string is mapped to points.
 
-Stage 3 — WeightEngine
-    Selects context-aware weights for the three top-level dimensions
-    (Efficiency, Quality, Complexity) based on the program type.
-    Weights sum to 1.0.
+        Efficiency sub-score (0–15)
+            Uses the Coefficient of Variation (CV = std / mean) of line
+            execution counts. CV is dimensionless and program-size-agnostic:
+            a perfectly flat execution profile → CV ≈ 0 (efficient);
+            a spiked nested-loop profile → CV >> 1 (inefficient).
 
-Stage 4 — NarrativeGenerator
-    Builds a plain-language explanation of the score that is useful to
-    both beginners and experienced programmers.
+    Quality (0–20)
+        From optimizer suggestions whose patterns affect runtime behaviour:
+        hot_loop, loop_invariant, repeated_computation, expensive_calls,
+        dead_code, constant_folding.
+        Weighted issue density (weighted_count / source_lines) is mapped
+        to points so that a 5-line and 50-line program with the same number
+        of issues are scored proportionally.
 
-PUBLIC API
-==========
-    calculate_full_score(source, result)   → ScoreReport   (primary)
-    calculate_score(profiling_data, ...)   → ScoreReport   (backwards-compatible)
-    Scorer(profiling_data, ...)            → .calculate()  (backwards-compatible)
+    Maintainability (0–15)
+        From optimizer suggestions whose patterns affect readability:
+        unused_vars, early_return, string_concat_loop, nested_loops.
+        Same weighted density formula, mapped to 0–15.
 
-The ScoreReport carries:
-    final_score        — 0–100
-    grade              — Excellent / Good / Fair / Poor / Critical
-    program_type       — what kind of program was detected
-    dimension_scores   — Efficiency / Quality / Complexity each 0–100
-    applied_weights    — the weights used for this program type
-    narrative          — plain-language explanation (audience-aware)
-    breakdown          — every sub-score and intermediate value
-    adaptive_context   — all computed thresholds (for UI transparency)
+Narrative:
+    A short human-readable explanation is generated from the final score
+    and the lowest-scoring dimension, aimed at beginners. It names one
+    concrete area to focus on rather than listing every problem.
 """
 
 from __future__ import annotations
 
 import math
-import statistics
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
-# Program type
+# Pattern classification
 # ---------------------------------------------------------------------------
 
-ProgramType = Literal[
-    "trivial",
-    "linear_script",
-    "recursive_computation",
-    "data_iteration",
-    "nested_processing",
-    "function_heavy",
-]
+# Patterns that affect runtime behaviour → Quality dimension
+QUALITY_PATTERNS = frozenset(
+    {
+        "hot_loop",
+        "loop_invariant",
+        "repeated_computation",
+        "expensive_calls",
+        "dead_code",
+        "constant_folding",
+    }
+)
+
+# Patterns that affect readability / structure → Maintainability dimension
+MAINTAINABILITY_PATTERNS = frozenset(
+    {
+        "unused_vars",
+        "early_return",
+        "string_concat_loop",
+        "nested_loops",
+    }
+)
 
 # ---------------------------------------------------------------------------
-# Constants — all documented with rationale
+# Complexity class → sub-score mapping (out of 15)
 # ---------------------------------------------------------------------------
 
-# ── Classification thresholds ────────────────────────────────────────────────
-# A loop body must execute at least this many times to be "looping"
-LOOP_THRESHOLD: int = 20
-# A function with max_recursion_depth >= this is "recursive"
-RECURSIVE_DEPTH_MIN: int = 1
-# A program with >= this many user functions (relative to lines) is "function_heavy"
-FUNCTION_HEAVY_RATIO: float = 0.15  # 15% of source lines are function defs
-
-# ── Complexity class base ratios  [0.0 = best … 1.0 = worst] ────────────────
-# These are the MAXIMUM ratios — actual penalty is modulated by scale × confidence
-COMPLEXITY_BASE: Dict[str, float] = {
-    "O(1)": 0.00,
-    "O(log n)": 0.05,
-    "O(n)": 0.10,
-    "O(n log n)": 0.28,
-    "O(n²)": 0.62,
-    "O(n³)": 0.82,
-    "O(n^k)": 0.93,
-    "O(2^n)": 1.00,
+COMPLEXITY_POINTS: Dict[str, float] = {
+    "O(1)": 15.0,
+    "O(log n)": 15.0,
+    "O(n)": 13.0,
+    "O(n log n)": 10.0,
+    "O(n²)": 6.0,
+    "O(n³)": 3.0,
+    "O(n^k)": 1.0,
+    "O(2^n)": 0.0,
 }
 
-# ── Scale normalisation ───────────────────────────────────────────────────────
-# log₁₀ denominator: a loop running 10^7 times gets full (1.0) scale factor
-# A loop running 100 times: log₁₀(100)/7 ≈ 0.29 → only 29% of base penalty
-LOG_SCALE_DENOM: float = 7.0
+# ---------------------------------------------------------------------------
+# Dimension maximums
+# ---------------------------------------------------------------------------
 
-# ── Justification credits ─────────────────────────────────────────────────────
-# Recursive programs earn a credit that reduces the complexity penalty
-# because high call counts are *expected* in recursive algorithms
-RECURSIVE_JUSTIFICATION_CREDIT: float = 0.35
+MAX_CORRECTNESS: float = 35.0
+MAX_EFFICIENCY_COMPLEXITY: float = 30.0  # 15 complexity + 15 efficiency
+MAX_QUALITY: float = 20.0
+MAX_MAINTAINABILITY: float = 15.0
 
-# ── Quality sub-dimension thresholds ─────────────────────────────────────────
-# Functions longer than this (in lines) start receiving a length penalty
-FUNCTION_LENGTH_THRESHOLD: int = 20
-# Maximum nesting depth before penalty starts (0-indexed: 0=top-level)
-MAX_ACCEPTABLE_NESTING: int = 2
-# Branch density (decision points / source lines) above which penalty starts
-MAX_ACCEPTABLE_BRANCH_DENSITY: float = 0.30
+# Partial credit (50 %) awarded when the required data is absent
+PARTIAL_COMPLEXITY: float = 7.0  # half of 15, rounded up
+PARTIAL_EFFICIENCY: float = 8.0  # half of 15, rounded up
+PARTIAL_QUALITY: float = 10.0  # half of 20
+PARTIAL_MAINTAINABILITY: float = 7.0  # half of 15, rounded up
 
-# ── Hotness weighting ─────────────────────────────────────────────────────────
-# Suggestions on lines that execute frequently should count more
-# hotness_factor = log(1 + execution_count) / log(1 + max_count)
-# This is applied per suggestion when the optimizer provides line numbers
+# Minimum number of lines to avoid division-by-zero in CV calculation
+MIN_LINES_FOR_CV: int = 2
 
-# ── Minimum data guards ───────────────────────────────────────────────────────
-MIN_LINES_FOR_STDEV: int = 3
-MIN_LINES_FOR_DEAD_CODE: int = 5
+# ---------------------------------------------------------------------------
+# Grade thresholds
+# ---------------------------------------------------------------------------
 
-# ── Context-aware dimension weights ──────────────────────────────────────────
-# Weights between Efficiency (E), Quality (Q), Complexity (C)
-# They shift based on program type because different types have different
-# "primary concerns" for what makes code good.
-#
-# Rationale per type:
-#   trivial            → quality is all that matters (nothing to be efficient about)
-#   linear_script      → quality dominates; complexity and efficiency are low stakes
-#   recursive_computation → complexity handling is the primary skill; quality second
-#   data_iteration     → efficiency dominates; this is where runtime waste shows
-#   nested_processing  → efficiency + complexity are both primary concerns
-#   function_heavy     → quality (decomposition, length) is the main skill signal
-
-DIMENSION_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "trivial": {
-        "efficiency": 0.15,
-        "quality": 0.70,
-        "complexity": 0.15,
-    },
-    "linear_script": {
-        "efficiency": 0.20,
-        "quality": 0.55,
-        "complexity": 0.25,
-    },
-    "recursive_computation": {
-        "efficiency": 0.25,
-        "quality": 0.35,
-        "complexity": 0.40,
-    },
-    "data_iteration": {
-        "efficiency": 0.45,
-        "quality": 0.30,
-        "complexity": 0.25,
-    },
-    "nested_processing": {
-        "efficiency": 0.38,
-        "quality": 0.25,
-        "complexity": 0.37,
-    },
-    "function_heavy": {
-        "efficiency": 0.20,
-        "quality": 0.50,
-        "complexity": 0.30,
-    },
-}
-
-# ── Grade thresholds ──────────────────────────────────────────────────────────
-GRADE_THRESHOLDS: List[Tuple[float, str]] = [
+GRADE_THRESHOLDS: List[tuple[float, str]] = [
     (90.0, "Excellent"),
     (75.0, "Good"),
     (60.0, "Fair"),
@@ -194,1330 +138,655 @@ GRADE_THRESHOLDS: List[Tuple[float, str]] = [
     (0.0, "Critical"),
 ]
 
-# Severity weights for issue density calculation
-SEVERITY_WEIGHTS: Dict[str, int] = {"high": 3, "medium": 2, "low": 1}
-
-# Maps optimizer pattern IDs to the scoring dimension they affect.
-# Used by the frontend to connect the score panel to the optimization panel.
-PATTERN_TO_DIMENSION: Dict[str, str] = {
-    "hot_loop": "efficiency",
-    "loop_invariant": "efficiency",
-    "repeated_computation": "efficiency",
-    "string_concat_loop": "efficiency",
-    "expensive_calls": "efficiency",
-    "nested_loops": "efficiency",
-    "unused_vars": "quality",
-    "dead_code": "quality",
-    "early_return": "quality",
-    "constant_folding": "quality",
-}
-
-
 # ---------------------------------------------------------------------------
-# Stage 1 — Program Profile
+# Output data class
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class ProgramProfile:
+class DimensionScores:
     """
-    A description of the program built before any scoring begins.
+    Scores for each individual dimension.
 
-    This is the foundation of context-aware scoring. Every penalty
-    and weight decision is made relative to this profile, not against
-    a universal standard.
+    All values are in the range [0, dimension_max].
     """
 
-    # Classification
-    program_type: ProgramType = "linear_script"
+    correctness: float = 0.0  # 0–35
+    efficiency_complexity: float = 0.0  # 0–30
+    quality: float = 0.0  # 0–20
+    maintainability: float = 0.0  # 0–15
 
-    # Execution shape
-    max_execution_count: int = 0
-    total_lines_executed: int = 0
-    lines_profiled: int = 0
-    scale_factor: float = 0.0  # log-magnitude normalisation [0, 1]
-    gini_index: float = 0.0  # execution concentration [0, 1]
-    complexity_class: str = "O(1)"
-    complexity_confidence: float = 1.0
+    # Sub-scores within efficiency_complexity (informational)
+    complexity_subscore: float = 0.0  # 0–15
+    efficiency_subscore: float = 0.0  # 0–15
 
-    # Structural shape (from AST when available)
-    total_source_lines: int = 1
-    function_count: int = 0
-    avg_function_length: float = 0.0
-    max_nesting_depth: int = 0
-    branch_count: int = 0
-    branch_density: float = 0.0  # decision points / source lines
-    has_dead_code: bool = False
-    dead_line_ratio: float = 0.0
+    # Flags that record whether partial credit was applied
+    profiling_partial: bool = False
+    optimizer_partial: bool = False
 
-    # Memory shape
-    memory_vars_mean: float = 0.0
-    memory_vars_stdev: float = 0.0
-    memory_adaptive_threshold: float = 0.0
-
-    # Issue shape
-    total_suggestions: int = 0
-    weighted_issue_score: float = 0.0
-    hotness_weighted_issue_score: float = 0.0
-    issue_density: float = 0.0
-
-
-class ProgramProfiler:
-    """
-    Stage 1: Builds a ProgramProfile from all available data sources.
-
-    Accepts:
-        profiling_data  — dict from ProfilingData.to_dict()
-        suggestions     — list of Suggestion objects (optional)
-        total_source_lines — line count of original source
-        function_stats  — from profiling_data["function_stats"] (optional)
-        ast             — ProgramNode (optional, enables structural analysis)
-    """
-
-    def __init__(
-        self,
-        profiling_data: Dict[str, Any],
-        suggestions: Optional[List[Any]] = None,
-        total_source_lines: int = 1,
-        function_stats: Optional[Dict[str, Any]] = None,
-        ast: Optional[Any] = None,
-    ) -> None:
-        self._profiling = profiling_data
-        self._suggestions = suggestions or []
-        self._tagged_suggestions: List[Dict[str, Any]] = []
-        self._source_lines = max(total_source_lines, 1)
-        self._function_stats = function_stats or {}
-        self._ast = ast
-
-        # Pre-extract from profiling dict
-        line_stats = self._profiling.get("line_stats", {})
-        self._line_stats = line_stats
-        self._exec_counts: List[int] = [s.get("count", 0) for s in line_stats.values()]
-        self._memory_vars: List[int] = [
-            s.get("memory_vars", 0) for s in line_stats.values()
-        ]
-        self._avg_times: List[float] = [
-            s.get("avg_time_ms", 0.0) for s in line_stats.values()
-        ]
-        self._max_count = max(self._exec_counts) if self._exec_counts else 0
-        self._total_executed = self._profiling.get("total_lines", 0)
-        self._lines_profiled = len(line_stats)
-
-    def build(self) -> ProgramProfile:
-        profile = ProgramProfile()
-
-        # Execution shape
-        profile.max_execution_count = self._max_count
-        profile.total_lines_executed = self._total_executed
-        profile.lines_profiled = self._lines_profiled
-        profile.scale_factor = self._compute_scale_factor()
-        profile.gini_index = self._compute_gini()
-        profile.complexity_class = self._detect_complexity()
-        profile.complexity_confidence = float(
-            self._profiling.get("complexity_confidence", 1.0)
-        )
-
-        # Source shape
-        profile.total_source_lines = self._source_lines
-
-        # Structural shape — from AST if available
-        ast_metrics = self._extract_ast_metrics()
-        profile.function_count = ast_metrics["function_count"]
-        profile.avg_function_length = ast_metrics["avg_function_length"]
-        profile.max_nesting_depth = ast_metrics["max_nesting_depth"]
-        profile.branch_count = ast_metrics["branch_count"]
-        profile.branch_density = ast_metrics["branch_density"]
-
-        # Dead code
-        profile.has_dead_code, profile.dead_line_ratio = self._dead_code()
-
-        # Memory
-        m_mean, m_stdev, m_thresh = self._memory_stats()
-        profile.memory_vars_mean = m_mean
-        profile.memory_vars_stdev = m_stdev
-        profile.memory_adaptive_threshold = m_thresh
-
-        # Issues
-        i_total, i_weighted, i_hot, i_density = self._issue_stats()
-        profile.total_suggestions = i_total
-        profile.weighted_issue_score = i_weighted
-        profile.hotness_weighted_issue_score = i_hot
-        profile.issue_density = i_density
-
-        # Classification — must come last (uses fields set above)
-        profile.program_type = self._classify(profile)
-
-        return profile
-
-    # ── Helpers ──────────────────────────────────────────────────────────────
-
-    def _compute_scale_factor(self) -> float:
-        """
-        Log-magnitude normalisation of execution count.
-        log₁₀(max_count) / LOG_SCALE_DENOM → [0, 1]
-        A loop running 100 times → ~0.29; 10M times → 1.0
-        """
-        if self._max_count < 2:
-            return 0.0
-        return min(math.log10(self._max_count) / LOG_SCALE_DENOM, 1.0)
-
-    def _compute_gini(self) -> float:
-        """
-        Gini coefficient of execution count distribution.
-        0 = perfectly even; 1 = all executions on one line.
-        Uses sorted-array formula for efficiency.
-        """
-        counts = [c for c in self._exec_counts if c >= 0]
-        n = len(counts)
-        if n < 2:
-            return 0.0
-        total = sum(counts)
-        if total == 0:
-            return 0.0
-        sorted_c = sorted(counts)
-        weighted = sum((i + 1) * x for i, x in enumerate(sorted_c))
-        gini = (2 * weighted) / (n * total) - (n + 1) / n
-        return max(0.0, min(gini, 1.0))
-
-    def _dead_code(self) -> Tuple[bool, float]:
-        if self._source_lines < MIN_LINES_FOR_DEAD_CODE:
-            return False, 0.0
-        dead = max(0, self._source_lines - self._lines_profiled)
-        ratio = min(dead / self._source_lines, 1.0)
-        return ratio > 0.0, ratio
-
-    def _memory_stats(self) -> Tuple[float, float, float]:
-        non_zero = [v for v in self._memory_vars if v > 0]
-        if len(non_zero) < MIN_LINES_FOR_STDEV:
-            mean = statistics.mean(self._memory_vars) if self._memory_vars else 0.0
-            return mean, 0.0, mean * 1.5 if mean > 0 else 10.0
-        mean = statistics.mean(non_zero)
-        stdev = statistics.stdev(non_zero)
-        return mean, stdev, mean + stdev
-
-    def _issue_stats(self) -> Tuple[int, float, float, float]:
-        if not self._suggestions:
-            return 0, 0.0, 0.0, 0.0
-
-        # Build a line → max execution count lookup
-        line_counts = {
-            int(line): s.get("count", 0) for line, s in self._line_stats.items()
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "correctness": round(self.correctness, 2),
+            "efficiency_complexity": round(self.efficiency_complexity, 2),
+            "quality": round(self.quality, 2),
+            "maintainability": round(self.maintainability, 2),
+            "complexity_subscore": round(self.complexity_subscore, 2),
+            "efficiency_subscore": round(self.efficiency_subscore, 2),
+            "profiling_partial": self.profiling_partial,
+            "optimizer_partial": self.optimizer_partial,
         }
-        max_c = max(self._exec_counts) if self._exec_counts else 1
-
-        weighted_total = 0.0
-        hotness_total = 0.0
-
-        for s in self._suggestions:
-            sev = getattr(s, "severity", None) or s.get("severity", "low")
-            w = SEVERITY_WEIGHTS.get(sev, 1)
-            weighted_total += w
-
-            line_no = getattr(s, "line", None) or s.get("line", 0)
-            exec_count = line_counts.get(int(line_no), 0) if line_no else 0
-            if max_c > 1:
-                hotness = math.log(1 + exec_count) / math.log(1 + max_c)
-            else:
-                hotness = 0.0
-            hotness_total += w * (1 + hotness)
-
-        density = weighted_total / max(self._source_lines, 10)
-
-        # Tag each suggestion with the dimension it affects
-        self._tagged_suggestions = [
-            {
-                "line": getattr(s, "line", None) or s.get("line", 0),
-                "pattern": getattr(s, "pattern", None) or s.get("pattern", ""),
-                "severity": getattr(s, "severity", None) or s.get("severity", "low"),
-                "description": getattr(s, "description", None)
-                or s.get("description", ""),
-                "suggestion": getattr(s, "suggestion", None) or s.get("suggestion", ""),
-                "impact_score": getattr(s, "impact_score", None)
-                or s.get("impact_score", 0.0),
-                "affects": PATTERN_TO_DIMENSION.get(
-                    getattr(s, "pattern", None) or s.get("pattern", ""), "quality"
-                ),
-                "hotness": (
-                    round(
-                        math.log(
-                            1
-                            + line_counts.get(
-                                int(getattr(s, "line", None) or s.get("line", 0)), 0
-                            )
-                        )
-                        / math.log(1 + max_c + 1),
-                        4,
-                    )
-                    if max_c > 1
-                    else 0.0
-                ),
-            }
-            for s in self._suggestions
-        ]
-
-        return len(self._suggestions), weighted_total, hotness_total, density
-
-    def _extract_ast_metrics(self) -> Dict[str, Any]:
-        """
-        Walk the AST for structural metrics when available.
-        Returns neutral defaults when no AST is provided.
-        """
-        defaults: Dict[str, Any] = {
-            "function_count": 0,
-            "avg_function_length": 0.0,
-            "max_nesting_depth": 0,
-            "branch_count": 0,
-            "branch_density": 0.0,
-        }
-        if self._ast is None:
-            return defaults
-
-        try:
-            import dataclasses as _dc
-
-            from optilang.ast_nodes import (
-                ForNode,
-                FunctionDefNode,
-                IfNode,
-                TryNode,
-                WhileNode,
-            )
-
-            function_lengths: List[int] = []
-            max_depth = 0
-            branch_count = 0
-
-            def walk(node: Any, depth: int = 0) -> None:
-                nonlocal max_depth, branch_count
-
-                if isinstance(node, FunctionDefNode):
-                    function_lengths.append(len(node.body))
-
-                if isinstance(node, (IfNode, WhileNode, ForNode, TryNode)):
-                    branch_count += 1
-                    max_depth = max(max_depth, depth)
-
-                for f in _dc.fields(node):
-                    val = getattr(node, f.name)
-                    if hasattr(val, "__dataclass_fields__"):
-                        walk(
-                            val,
-                            (
-                                depth + 1
-                                if isinstance(
-                                    node,
-                                    (
-                                        IfNode,
-                                        WhileNode,
-                                        ForNode,
-                                        TryNode,
-                                        FunctionDefNode,
-                                    ),
-                                )
-                                else depth
-                            ),
-                        )
-                    elif isinstance(val, list):
-                        for item in val:
-                            if hasattr(item, "__dataclass_fields__"):
-                                walk(
-                                    item,
-                                    (
-                                        depth + 1
-                                        if isinstance(
-                                            node,
-                                            (
-                                                IfNode,
-                                                WhileNode,
-                                                ForNode,
-                                                TryNode,
-                                                FunctionDefNode,
-                                            ),
-                                        )
-                                        else depth
-                                    ),
-                                )
-                            elif isinstance(item, tuple):
-                                for elem in item:
-                                    if hasattr(elem, "__dataclass_fields__"):
-                                        walk(elem, depth)
-
-            walk(self._ast)
-
-            avg_len = statistics.mean(function_lengths) if function_lengths else 0.0
-            density = branch_count / max(self._source_lines, 1)
-
-            return {
-                "function_count": len(function_lengths),
-                "avg_function_length": round(avg_len, 2),
-                "max_nesting_depth": max_depth,
-                "branch_count": branch_count,
-                "branch_density": round(density, 4),
-            }
-        except Exception:
-            return defaults
-
-    def _classify(self, p: ProgramProfile) -> ProgramType:
-        """
-        Classify into one of six program types using a priority chain.
-
-        Priority order (first match wins):
-            trivial            → max execution count ≤ 1
-            recursive          → any function with recursion depth ≥ threshold
-            data_iteration     → high max count + low function count
-            nested_processing  → high max count + gini shows heavy hotspot
-            function_heavy     → many functions relative to source lines
-            linear_script      → everything else (default)
-        """
-        if p.max_execution_count <= 1:
-            return "trivial"
-
-        # Check for recursion in function stats
-        for stats in self._function_stats.values():
-            depth = (
-                stats.get("max_recursion_depth", 0)
-                if isinstance(stats, dict)
-                else getattr(stats, "max_recursion_depth", 0)
-            )
-            if depth >= RECURSIVE_DEPTH_MIN:
-                return "recursive_computation"
-
-        # Nested processing: high execution + strong hotspot concentration
-        if (
-            p.max_execution_count > LOOP_THRESHOLD
-            and p.gini_index > 0.6
-            and p.complexity_class in ("O(n²)", "O(n³)", "O(n^k)")
-        ):
-            return "nested_processing"
-
-        # Data iteration: significant looping but not heavily nested
-        if p.max_execution_count > LOOP_THRESHOLD:
-            return "data_iteration"
-
-        # Function heavy: many functions relative to code size
-        fn_ratio = p.function_count / max(p.total_source_lines, 1)
-        if fn_ratio >= FUNCTION_HEAVY_RATIO and p.function_count >= 2:
-            return "function_heavy"
-
-        return "linear_script"
-
-    # ── Complexity detection (proven heuristic, unchanged) ────────────────────
-
-    def _detect_complexity(self) -> str:
-        if self._max_count == 0:
-            return "O(1)"
-        max_c = self._max_count
-        hot = [c for c in self._exec_counts if c >= max_c * 0.5]
-        n_hot = [c for c in self._exec_counts if c < max_c * 0.5]
-        cluster = len(hot)
-        sqrt_max = math.sqrt(max_c)
-        max_nh = max(n_hot) if n_hot else 0
-        has_outer = max_nh > sqrt_max * 0.5
-        n = max(max_c, self._lines_profiled, 4)
-        if not has_outer:
-            return self._linear_or_below(max_c, n)
-        if self._is_exponential(max_c, n):
-            return "O(2^n)"
-        if cluster <= 2:
-            return "O(n²)"
-        if cluster == 3:
-            return "O(n³)"
-        return "O(n^k)"
-
-    def _linear_or_below(self, max_c: int, n: int) -> str:
-        lg = math.log2(n)
-        if max_c <= 1:
-            return "O(1)"
-        if max_c <= lg * 2:
-            return "O(log n)"
-        if max_c <= n * 2:
-            return "O(n)"
-        if max_c <= n * lg * 3:
-            return "O(n log n)"
-
-        return "O(n²)"
-
-    def _is_exponential(self, max_c: int, n: int) -> bool:
-        return max_c >= 1_000_000 and n <= 60 and max_c >= (2**n) * 0.5
-
-
-# ---------------------------------------------------------------------------
-# Stage 2 — Dimension Scorer
-# ---------------------------------------------------------------------------
-
-
-class DimensionScorer:
-    """
-    Stage 2: Scores each sub-dimension on a 0–100 scale.
-
-    Each method returns (score_0_to_100, detail_dict).
-    Score of 100 = perfect; 0 = worst possible for that dimension.
-    """
-
-    def __init__(self, profile: ProgramProfile) -> None:
-        self._p = profile
-
-    # ── E1: Execution Efficiency ──────────────────────────────────────────────
-
-    def execution_efficiency(self) -> Tuple[float, Dict[str, Any]]:
-        """
-        How well does the program use its execution cycles?
-
-        Key signal: the Gini index of execution distribution.
-        A Gini near 0 means all lines run equally (efficient).
-        A Gini near 1 means one line dominates (potential hotspot).
-
-        Adjusted by:
-        - scale_factor: a tiny loop is not a concern even if it dominates
-        - complexity class: some concentration is expected in O(n) loops
-        - hotness-weighted issue score: issues on hot lines penalise harder
-
-        Formula:
-            base_waste   = gini × scale_factor
-            issue_factor = tanh(hotness_weighted_issues / max(lines, 10) × 2)
-            combined     = (base_waste × 0.6) + (issue_factor × 0.4)
-            score        = (1 − combined) × 100
-        """
-        p = self._p
-        base_waste = p.gini_index * p.scale_factor
-
-        # Issue contribution — problems on hot lines matter more
-        max_issues = max(p.total_source_lines, 10)
-        issue_factor = math.tanh((p.hotness_weighted_issue_score / max_issues) * 2.0)
-
-        combined = (base_waste * 0.6) + (issue_factor * 0.4)
-        combined = max(0.0, min(combined, 1.0))
-        score = (1.0 - combined) * 100.0
-
-        detail = {
-            "gini_index": round(p.gini_index, 4),
-            "scale_factor": round(p.scale_factor, 4),
-            "base_waste": round(base_waste, 4),
-            "hotness_weighted_issues": round(p.hotness_weighted_issue_score, 4),
-            "issue_factor": round(issue_factor, 4),
-        }
-        return round(score, 2), detail
-
-    # ── E2: Memory Efficiency ─────────────────────────────────────────────────
-
-    def memory_efficiency(self) -> Tuple[float, Dict[str, Any]]:
-        """
-        How well does the program manage its variable scope?
-
-        Uses the program's own mean+σ as the 'high' threshold rather than
-        a fixed constant, so every program judges itself against its own
-        baseline. A line above the adaptive threshold is "high pressure".
-
-        Formula:
-            high_pressure_lines = lines where memory_vars > adaptive_threshold
-            pressure_ratio      = high_pressure_lines / lines_profiled
-            score               = (1 − pressure_ratio) × 100
-        """
-        p = self._p
-        mem_vars = p.memory_vars_mean  # we only have aggregate here # noqa: F841
-
-        # If no meaningful memory data, return neutral
-        if p.lines_profiled == 0 or p.memory_vars_stdev == 0.0:
-            return 100.0, {
-                "memory_adaptive_threshold": round(p.memory_adaptive_threshold, 2),
-                "memory_mean_vars": round(p.memory_vars_mean, 2),
-                "memory_stdev_vars": round(p.memory_vars_stdev, 2),
-                "pressure_ratio": 0.0,
-                "note": "Insufficient data for adaptive threshold",
-            }
-
-        # Estimate pressure ratio from mean and stdev:
-        # If mean is well below threshold, pressure is low.
-        # We approximate using how far mean is below threshold.
-        threshold = p.memory_adaptive_threshold
-        if threshold <= 0:
-            pressure_ratio = 0.0
-        else:
-            # How much does the mean exceed the threshold?
-            # By definition threshold = mean + stdev, so mean is always below.
-            # We use stdev/mean as a proxy for spread — high spread means
-            # some lines are significantly above the threshold.
-            spread = p.memory_vars_stdev / max(p.memory_vars_mean, 1.0)
-            # Normalize: spread > 1 means significant high-memory outliers
-            pressure_ratio = min(spread / 3.0, 1.0)
-
-        score = (1.0 - pressure_ratio) * 100.0
-
-        detail = {
-            "memory_adaptive_threshold": round(threshold, 2),
-            "memory_mean_vars": round(p.memory_vars_mean, 2),
-            "memory_stdev_vars": round(p.memory_vars_stdev, 2),
-            "pressure_ratio": round(pressure_ratio, 4),
-        }
-        return round(score, 2), detail
-
-    # ── Q1: Code Cleanliness ──────────────────────────────────────────────────
-
-    def code_cleanliness(self) -> Tuple[float, Dict[str, Any]]:
-        """
-        How clean and well-structured is the code?
-
-        Four sub-signals, averaged:
-
-        dead_code_score:
-            dead_ratio = (source_lines - profiled_lines) / source_lines
-            score = (1 - dead_ratio) × 100
-
-        function_length_score:
-            Sigmoid penalty for average function length above threshold.
-            score = 100 × sigmoid(-k × (avg_len - threshold))
-            where k controls how quickly the penalty grows.
-
-        nesting_score:
-            Linear penalty above MAX_ACCEPTABLE_NESTING depth.
-            score = max(0, 1 - excess / MAX_ACCEPTABLE_NESTING) × 100
-
-        branching_score:
-            Penalty when branch density exceeds MAX_ACCEPTABLE_BRANCH_DENSITY.
-            score = max(0, 1 - excess_density / MAX_ACCEPTABLE_BRANCH_DENSITY) × 100
-        """
-        p = self._p
-
-        # Dead code
-        dead_score = (1.0 - p.dead_line_ratio) * 100.0
-
-        # Function length
-        if p.avg_function_length == 0.0:
-            fn_score = 100.0  # no functions or no AST → no penalty
-        else:
-            excess = max(0.0, p.avg_function_length - FUNCTION_LENGTH_THRESHOLD)
-            # Sigmoid: at threshold+10 lines → score ~50; at threshold+30 → ~20
-            fn_score = 100.0 / (1.0 + math.exp(0.15 * excess - 1.5))
-
-        # Nesting depth
-        if p.max_nesting_depth == 0:
-            nesting_score = 100.0
-        else:
-            excess_depth = max(0, p.max_nesting_depth - MAX_ACCEPTABLE_NESTING)
-            nesting_score = max(
-                0.0, (1.0 - excess_depth / max(MAX_ACCEPTABLE_NESTING, 1)) * 100.0
-            )
-
-        # Branch density
-        if p.branch_density == 0.0:
-            branch_score = 100.0
-        else:
-            excess_density = max(0.0, p.branch_density - MAX_ACCEPTABLE_BRANCH_DENSITY)
-            branch_score = max(
-                0.0, (1.0 - excess_density / MAX_ACCEPTABLE_BRANCH_DENSITY) * 100.0
-            )
-
-        # Weighted average — dead code and nesting matter most
-        cleanliness = (
-            dead_score * 0.35
-            + fn_score * 0.25
-            + nesting_score * 0.25
-            + branch_score * 0.15
-        )
-
-        detail = {
-            "dead_line_ratio": round(p.dead_line_ratio, 4),
-            "dead_code_score": round(dead_score, 2),
-            "avg_function_length": round(p.avg_function_length, 2),
-            "function_length_score": round(fn_score, 2),
-            "max_nesting_depth": p.max_nesting_depth,
-            "nesting_score": round(nesting_score, 2),
-            "branch_density": round(p.branch_density, 4),
-            "branch_score": round(branch_score, 2),
-        }
-        return round(cleanliness, 2), detail
-
-    # ── Q2: Issue Density ─────────────────────────────────────────────────────
-
-    def issue_density(self) -> Tuple[float, Dict[str, Any]]:
-        """
-        How many optimization problems were found, weighted by severity
-        and normalized by program size?
-
-        Uses tanh to keep the score bounded even for heavily-flagged programs.
-        Issues on hot lines (hotness_weighted) count more than cold ones.
-
-        Formula:
-            density_score = tanh(issue_density × 3)
-            score         = (1 − density_score) × 100
-        """
-        p = self._p
-        if p.total_suggestions == 0:
-            return 100.0, {
-                "suggestion_count": 0,
-                "weighted_issue_score": 0.0,
-                "issue_density": 0.0,
-            }
-
-        density_score = math.tanh(p.issue_density * 3.0)
-        score = (1.0 - density_score) * 100.0
-
-        detail = {
-            "suggestion_count": p.total_suggestions,
-            "weighted_issue_score": round(p.weighted_issue_score, 4),
-            "hotness_weighted_score": round(p.hotness_weighted_issue_score, 4),
-            "issue_density": round(p.issue_density, 4),
-            "density_score": round(density_score, 4),
-        }
-        return round(score, 2), detail
-
-    # ── C1: Complexity Handling ───────────────────────────────────────────────
-
-    def complexity_handling(self) -> Tuple[float, Dict[str, Any]]:
-        """
-        How appropriate is the program's complexity for its goal?
-
-        Formula:
-            base_ratio    = COMPLEXITY_BASE[class]
-            scaled_ratio  = base_ratio × scale_factor × confidence
-            credit        = RECURSIVE_JUSTIFICATION_CREDIT if recursive
-            final_ratio   = scaled_ratio × (1 − credit)
-            score         = (1 − final_ratio) × 100
-
-        Rationale:
-        - base_ratio: O(n²) is inherently worse than O(n)
-        - scale_factor: a small nested loop barely matters at runtime
-        - confidence: if the profiler is 60% sure, the penalty is 60%
-        - credit: recursion justifies higher complexity — it's intentional
-        """
-        p = self._p
-        base = COMPLEXITY_BASE.get(p.complexity_class, 0.0)
-        scaled = base * p.scale_factor * p.complexity_confidence
-
-        credit = 0.0
-        if p.program_type == "recursive_computation":
-            credit = RECURSIVE_JUSTIFICATION_CREDIT
-
-        final_ratio = scaled * (1.0 - credit)
-        final_ratio = max(0.0, min(final_ratio, 1.0))
-        score = (1.0 - final_ratio) * 100.0
-
-        detail = {
-            "complexity_class": p.complexity_class,
-            "base_ratio": round(base, 4),
-            "scale_factor": round(p.scale_factor, 4),
-            "confidence": round(p.complexity_confidence, 4),
-            "justification_credit": round(credit, 4),
-            "final_complexity_ratio": round(final_ratio, 4),
-        }
-        return round(score, 2), detail
-
-
-# ---------------------------------------------------------------------------
-# Stage 3 — Weight Engine
-# ---------------------------------------------------------------------------
-
-
-class WeightEngine:
-    """
-    Stage 3: Selects dimension weights based on program type.
-
-    Returns a dict with keys "efficiency", "quality", "complexity"
-    summing to 1.0.
-    """
-
-    @staticmethod
-    def weights_for(program_type: ProgramType) -> Dict[str, float]:
-        return DIMENSION_WEIGHTS.get(
-            program_type, DIMENSION_WEIGHTS["linear_script"]  # safe default
-        )
-
-
-# ---------------------------------------------------------------------------
-# Stage 4 — Narrative Generator
-# ---------------------------------------------------------------------------
-
-
-class NarrativeGenerator:
-    """
-    Stage 4: Builds a plain-language explanation of the score.
-
-    The narrative is designed for two audiences simultaneously:
-        - Beginners / learners / educators: understand what the score means
-          and know what to improve first
-        - Experienced programmers: get specific, actionable information
-          without unnecessary padding
-
-    Each narrative is built from three parts:
-        1. What the program is (one sentence)
-        2. What the score reflects (one sentence per weak dimension)
-        3. The single most important thing to fix (one sentence)
-    """
-
-    def __init__(
-        self,
-        profile: ProgramProfile,
-        efficiency_score: float,
-        quality_score: float,
-        complexity_score: float,
-        final_score: float,
-        grade: str,
-    ) -> None:
-        self._p = profile
-        self._eff = efficiency_score
-        self._qlt = quality_score
-        self._cmp = complexity_score
-        self._score = final_score
-        self._grade = grade
-
-    def generate(self) -> str:
-        parts: List[str] = []
-
-        # Part 1 — What the program is
-        parts.append(self._program_description())
-
-        # Part 2 — What each dimension reflects (only mention weak ones)
-        dim_feedback = self._dimension_feedback()
-        if dim_feedback:
-            parts.append(dim_feedback)
-
-        # Part 3 — Overall verdict + top recommendation
-        parts.append(self._verdict())
-
-        return " ".join(parts)
-
-    def _program_description(self) -> str:
-        p = self._p
-        type_descriptions = {
-            "trivial": "This is a simple, single-pass program.",
-            "linear_script": "This is a linear script with straightforward"
-            " execution flow.",
-            "recursive_computation": "This program uses recursion as its primary"
-            " computational approach.",
-            "data_iteration": "This program processes data using loops and"
-            " iteration.",
-            "nested_processing": "This program uses nested loops to process"
-            " data, which creates higher computational"
-            " demands.",
-            "function_heavy": "This program is structured around multiple"
-            " function definitions.",
-        }
-        base = type_descriptions.get(p.program_type, "This program was analysed.")
-
-        # Add complexity if it's notable
-        if p.complexity_class not in ("O(1)", "O(log n)", "O(n)"):
-            base += (
-                f" Its time complexity is estimated at {p.complexity_class}"
-                f" (confidence: {int(p.complexity_confidence * 100)}%)."
-            )
-
-        return base
-
-    def _dimension_feedback(self) -> str:
-        feedbacks: List[str] = []
-        p = self._p
-
-        # Efficiency
-        if self._eff < 70:
-            if p.gini_index > 0.7:
-                feedbacks.append(
-                    f"Execution is highly concentrated — "
-                    f"{int(p.gini_index * 100)}% of work is done by a small"
-                    f" number of lines, suggesting a potential hotspot."
-                )
-            elif p.hotness_weighted_issue_score > 5:
-                feedbacks.append(
-                    "Several optimization issues were found on frequently"
-                    " executed lines, which amplifies their performance impact."
-                )
-
-        # Quality
-        if self._qlt < 70:
-            if p.dead_line_ratio > 0.15:
-                feedbacks.append(
-                    f"About {int(p.dead_line_ratio * 100)}% of the source lines"
-                    f" were never executed — this may indicate dead branches or"
-                    f" unused code paths."
-                )
-            if p.avg_function_length > FUNCTION_LENGTH_THRESHOLD:
-                feedbacks.append(
-                    f"Functions average {p.avg_function_length:.0f} lines,"
-                    f" which is above the recommended {FUNCTION_LENGTH_THRESHOLD}."
-                    f" Shorter functions are easier to test and optimise."
-                )
-            if p.max_nesting_depth > MAX_ACCEPTABLE_NESTING:
-                feedbacks.append(
-                    f"The code reaches a nesting depth of {p.max_nesting_depth}."
-                    f" Deep nesting makes logic harder to follow and"
-                    f" often hides optimisation opportunities."
-                )
-            if p.total_suggestions > 0 and self._qlt < 60:
-                feedbacks.append(
-                    f"{p.total_suggestions} optimization issue"
-                    f"{'s were' if p.total_suggestions > 1 else ' was'}"
-                    f" detected across the program."
-                )
-
-        # Complexity
-        if self._cmp < 70:
-            if p.scale_factor > 0.5:
-                feedbacks.append(
-                    f"The {p.complexity_class} complexity is significant at this"
-                    f" execution scale — the hottest line ran"
-                    f" {p.max_execution_count:,} times."
-                )
-
-        return " ".join(feedbacks)
-
-    def _verdict(self) -> str:
-        p = self._p  # noqa: F841
-        score = self._score
-
-        # Find the weakest dimension to prioritize
-        dims = {
-            "efficiency": self._eff,
-            "quality": self._qlt,
-            "complexity": self._cmp,
-        }
-        weakest = min(dims, key=dims.get)  # type: ignore[arg-type]
-
-        if score >= 90:
-            return (
-                "Overall, this is well-written, efficient code."
-                " Keep up the good work."
-            )
-
-        if score >= 75:
-            recommendations = {
-                "efficiency": "Focus on reducing work in the most-executed lines.",
-                "quality": "Refactor for cleaner structure and remove any"
-                " unused code.",
-                "complexity": "Consider whether the algorithm can be simplified"
-                " for the input sizes you typically use.",
-            }
-            return f"The code is generally good." f" {recommendations.get(weakest, '')}"
-
-        if score >= 60:
-            recommendations = {
-                "efficiency": "The primary concern is execution efficiency —"
-                " review the hottest lines for unnecessary work.",
-                "quality": "The primary concern is code quality — dead code,"
-                " long functions, or deep nesting are dragging"
-                " the score down.",
-                "complexity": "The primary concern is computational complexity —"
-                " consider a more efficient algorithm.",
-            }
-            return recommendations.get(weakest, "There is room for improvement.")
-
-        if score >= 40:
-            return (
-                "There are significant issues across multiple dimensions."
-                " Start by addressing the highest-severity suggestions,"
-                " then revisit the overall structure of the program."
-            )
-
-        return (
-            "This program has fundamental efficiency or quality problems."
-            " Consider reviewing the algorithm design, removing dead code,"
-            " and addressing all high-severity suggestions before"
-            " optimising further."
-        )
-
-
-# ---------------------------------------------------------------------------
-# DynamicScorer — orchestrates all four stages
-# ---------------------------------------------------------------------------
-
-
-class DynamicScorer:
-    """
-    Orchestrates the full four-stage scoring pipeline.
-
-    Usage (primary path)::
-
-        from optilang.scoring import calculate_full_score
-        report = calculate_full_score(source, result)
-
-    Usage (direct)::
-
-        scorer = DynamicScorer(
-            profiling_data=result.profiling.to_dict(),
-            suggestions=optimizer_report.suggestions,
-            total_source_lines=len(source.splitlines()),
-            function_stats=result.profiling.to_dict()["function_stats"],
-            ast=parsed_ast,
-        )
-        report = scorer.calculate()
-    """
-
-    def __init__(
-        self,
-        profiling_data: Dict[str, Any],
-        suggestions: Optional[List[Any]] = None,
-        total_source_lines: int = 1,
-        function_stats: Optional[Dict[str, Any]] = None,
-        ast: Optional[Any] = None,
-    ) -> None:
-        self._profiling = profiling_data
-        self._suggestions = suggestions or []
-        self._source_lines = max(total_source_lines, 1)
-        self._function_stats = function_stats or {}
-        self._ast = ast
-
-    def calculate(self) -> "ScoreReport":
-        # Stage 1 — Profile
-        profiler = ProgramProfiler(
-            profiling_data=self._profiling,
-            suggestions=self._suggestions,
-            total_source_lines=self._source_lines,
-            function_stats=self._function_stats,
-            ast=self._ast,
-        )
-        profile = profiler.build()
-
-        # Stage 2 — Dimension scores
-        dim = DimensionScorer(profile)
-
-        eff_exec_score, eff_exec_detail = dim.execution_efficiency()
-        eff_mem_score, eff_mem_detail = dim.memory_efficiency()
-        qlt_clean_score, qlt_clean_detail = dim.code_cleanliness()
-        qlt_issue_score, qlt_issue_detail = dim.issue_density()
-        cmp_score, cmp_detail = dim.complexity_handling()
-
-        # Aggregate top-level dimension scores
-        efficiency_score = eff_exec_score * 0.65 + eff_mem_score * 0.35
-        quality_score = qlt_clean_score * 0.60 + qlt_issue_score * 0.40
-        complexity_score = cmp_score
-
-        # Stage 3 — Weights
-        weights = WeightEngine.weights_for(profile.program_type)
-        w_e = weights["efficiency"]
-        w_q = weights["quality"]
-        w_c = weights["complexity"]
-
-        final_score = (
-            efficiency_score * w_e + quality_score * w_q + complexity_score * w_c
-        )
-        final_score = max(0.0, min(100.0, round(final_score, 2)))
-        grade = _assign_grade(final_score)
-
-        # Stage 4 — Narrative
-        narrative = NarrativeGenerator(
-            profile=profile,
-            efficiency_score=efficiency_score,
-            quality_score=quality_score,
-            complexity_score=complexity_score,
-            final_score=final_score,
-            grade=grade,
-        ).generate()
-
-        # Collect tagged suggestions from the profiler
-        tagged = profiler._tagged_suggestions
-
-        # Assemble full breakdown
-        breakdown: Dict[str, Any] = {
-            "efficiency_score": round(efficiency_score, 2),
-            "quality_score": round(quality_score, 2),
-            "complexity_score": round(complexity_score, 2),
-            "execution_efficiency_score": round(eff_exec_score, 2),
-            "memory_efficiency_score": round(eff_mem_score, 2),
-            "code_cleanliness_score": round(qlt_clean_score, 2),
-            "issue_density_score": round(qlt_issue_score, 2),
-            "execution_efficiency_detail": eff_exec_detail,
-            "memory_efficiency_detail": eff_mem_detail,
-            "code_cleanliness_detail": qlt_clean_detail,
-            "issue_density_detail": qlt_issue_detail,
-            "complexity_detail": cmp_detail,
-            # Per-dimension explanation: why each dimension scored as it did
-            "dimension_detail": {
-                "efficiency": {
-                    "score": round(efficiency_score, 2),
-                    "loss": round(100.0 - efficiency_score, 2),
-                    "suggestions": [s for s in tagged if s["affects"] == "efficiency"],
-                },
-                "quality": {
-                    "score": round(quality_score, 2),
-                    "loss": round(100.0 - quality_score, 2),
-                    "suggestions": [s for s in tagged if s["affects"] == "quality"],
-                },
-                "complexity": {
-                    "score": round(complexity_score, 2),
-                    "loss": round(100.0 - complexity_score, 2),
-                    "suggestions": [],  # complexity is driven by execution data
-                },
-            },
-            # All suggestions tagged with dimension and hotness, sorted by impact
-            "tagged_suggestions": sorted(
-                tagged,
-                key=lambda s: s["impact_score"],
-                reverse=True,
-            ),
-        }
-
-        adaptive_context: Dict[str, Any] = {
-            "program_type": profile.program_type,
-            "scale_factor": round(profile.scale_factor, 4),
-            "gini_index": round(profile.gini_index, 4),
-            "complexity_class": profile.complexity_class,
-            "complexity_confidence": round(profile.complexity_confidence, 4),
-            "max_execution_count": profile.max_execution_count,
-            "lines_profiled": profile.lines_profiled,
-            "dead_line_ratio": round(profile.dead_line_ratio, 4),
-            "memory_adaptive_threshold": round(profile.memory_adaptive_threshold, 2),
-            "memory_mean_vars": round(profile.memory_vars_mean, 2),
-            "memory_stdev_vars": round(profile.memory_vars_stdev, 2),
-            "total_suggestions": profile.total_suggestions,
-            "issue_density": round(profile.issue_density, 4),
-            "applied_weights": {
-                "efficiency": w_e,
-                "quality": w_q,
-                "complexity": w_c,
-            },
-        }
-
-        return ScoreReport(
-            final_score=final_score,
-            grade=grade,
-            program_type=profile.program_type,
-            complexity_class=profile.complexity_class,
-            dimension_scores={
-                "efficiency": round(efficiency_score, 2),
-                "quality": round(quality_score, 2),
-                "complexity": round(complexity_score, 2),
-            },
-            applied_weights={
-                "efficiency": w_e,
-                "quality": w_q,
-                "complexity": w_c,
-            },
-            narrative=narrative,
-            breakdown=breakdown,
-            adaptive_context=adaptive_context,
-        )
-
-
-# ---------------------------------------------------------------------------
-# ScoreReport — output data class
-# ---------------------------------------------------------------------------
 
 
 @dataclass
 class ScoreReport:
     """
-    Complete scoring report.
+    Complete scoring report returned by the Scorer.
 
-    The score reflects how well the program is written *relative to what
-    it is trying to do* — not a checklist of universal penalties.
-
-    Fields
-    ------
-    final_score      : Overall score 0–100. Higher = better.
-    grade            : Excellent / Good / Fair / Poor / Critical
-    program_type     : What kind of program was detected
-    complexity_class : Estimated time complexity
-    dimension_scores : Efficiency / Quality / Complexity each 0–100
-    applied_weights  : Weights used for this program type (sum to 1.0)
-    narrative        : Plain-language explanation for any audience
-    breakdown        : All sub-scores and intermediate values
-    adaptive_context : All computed thresholds (for UI transparency)
+    Attributes:
+        score:             Final score (0.0–100.0).
+        grade:             Human-readable grade label.
+        complexity_class:  Detected Big-O class string.
+        dimensions:        Per-dimension score breakdown.
+        narrative:         Beginner-friendly explanation of the score.
+        error_count:       Number of errors in result.errors.
+        lines_profiled:    Number of unique lines that were executed.
+        cv:                Coefficient of variation of execution counts.
     """
 
-    final_score: float
+    score: float
     grade: str
-    program_type: str
     complexity_class: str
-    dimension_scores: Dict[str, float] = field(default_factory=dict)
-    applied_weights: Dict[str, float] = field(default_factory=dict)
-    narrative: str = ""
-    breakdown: Dict[str, Any] = field(default_factory=dict)
-    adaptive_context: Dict[str, Any] = field(default_factory=dict)
-
-    # ── Backwards-compatible aliases ─────────────────────────────────────────
-    @property
-    def score(self) -> float:
-        """Alias for final_score — backwards compatible with old ScoreReport."""
-        return self.final_score
+    dimensions: DimensionScores
+    narrative: str
+    error_count: int = 0
+    lines_profiled: int = 0
+    cv: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to a plain, JSON-safe dictionary."""
         return {
-            "final_score": round(self.final_score, 2),
-            "score": round(self.final_score, 2),  # alias
+            "score": round(self.score, 2),
             "grade": self.grade,
-            "program_type": self.program_type,
             "complexity_class": self.complexity_class,
-            "dimension_scores": {
-                k: round(v, 2) for k, v in self.dimension_scores.items()
-            },
-            "applied_weights": self.applied_weights,
+            "dimensions": self.dimensions.to_dict(),
             "narrative": self.narrative,
-            "breakdown": _round_dict(self.breakdown),
-            "adaptive_context": _round_dict(self.adaptive_context),
+            "error_count": self.error_count,
+            "lines_profiled": self.lines_profiled,
+            "cv": round(self.cv, 4),
         }
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Internal complexity heuristic (extracted from original Scorer)
+# ---------------------------------------------------------------------------
+
+# These constants are unchanged from the original scoring.py heuristic.
+EXPONENTIAL_COUNT_THRESHOLD: int = 1_000_000
+MIN_N: int = 4
+
+
+def _detect_complexity(line_stats: Dict[str, Any]) -> str:
+    """
+    Heuristic Big-O detection from a single execution trace.
+
+    Reads execution counts from profiling line_stats and returns a
+    standard complexity class string. This is the same algorithm as
+    the original Scorer._detect_complexity() and is kept here as a
+    module-level function so it can be used without instantiating Scorer.
+
+    Returns one of:
+        "O(1)", "O(log n)", "O(n)", "O(n log n)",
+        "O(n²)", "O(n³)", "O(n^k)", "O(2^n)"
+    """
+    if not line_stats:
+        return "O(1)"
+
+    execution_counts: List[int] = [int(s.get("count", 0)) for s in line_stats.values()]
+    lines_profiled = len(execution_counts)
+    max_c = max(execution_counts) if execution_counts else 0
+
+    if max_c == 0:
+        return "O(1)"
+
+    HOT_RATIO = 0.5
+    hot_counts = [c for c in execution_counts if c >= max_c * HOT_RATIO]
+    non_hot = [c for c in execution_counts if c < max_c * HOT_RATIO]
+    cluster_size = len(hot_counts)
+
+    sqrt_max = math.sqrt(max_c)
+    max_non_hot = max(non_hot) if non_hot else 0
+    has_outer_loop = max_non_hot > sqrt_max * 0.5
+
+    n = max(max_c, lines_profiled, MIN_N)
+
+    if not has_outer_loop:
+        return _classify_linear_or_below(max_c, n)
+
+    if _is_exponential(max_c, n):
+        return "O(2^n)"
+
+    if cluster_size <= 2:
+        return "O(n²)"
+    elif cluster_size == 3:
+        return "O(n³)"
+    else:
+        return "O(n^k)"
+
+
+def _classify_linear_or_below(max_c: int, n: int) -> str:
+    log_n = math.log2(n)
+    if max_c <= 1:
+        return "O(1)"
+    if max_c <= log_n * 2:
+        return "O(log n)"
+    if max_c <= n * 2:
+        return "O(n)"
+    if max_c <= n * log_n * 3:
+        return "O(n log n)"
+    return "O(n²)"
+
+
+def _is_exponential(max_c: int, n: int) -> bool:
+    if max_c < EXPONENTIAL_COUNT_THRESHOLD:
+        return False
+    if n > 60:
+        return False
+    return bool(max_c >= (2**n) * 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Main Scorer class
+# ---------------------------------------------------------------------------
+
+
+class Scorer:
+    """
+    Calculates a four-dimension optimization score (0–100).
+
+    Args:
+        profiling_data:    Dict from ``ProfilingData.to_dict()``.
+                           Pass ``None`` when profiling is unavailable —
+                           partial credit is awarded automatically.
+        optimizer_report:  ``OptimizationReport`` from ``Optimizer.run()``.
+                           Pass ``None`` when the optimizer has not run —
+                           partial credit is awarded automatically.
+        source_lines:      Number of lines in the original source code.
+                           Used to normalise quality/maintainability density.
+        errors:            List of error strings from ``ExecutionResult.errors``.
+                           Defaults to empty list (perfect correctness).
+
+    Usage::
+
+        from optilang import execute
+        from optilang.lexer import tokenize
+        from optilang.parser import parse
+        from optilang.optimizer import Optimizer
+        from optilang.scoring import Scorer
+
+        source = \"\"\"
+        for i in range(100):
+            for j in range(100):
+                x = i + j
+        \"\"\"
+
+        result   = execute(source)
+        ast      = parse(tokenize(source))
+        report   = Optimizer(ast, result.profiling, result.symbol_table).run()
+
+        scorer   = Scorer(
+            profiling_data=result.profiling.to_dict() if result.profiling else None,
+            optimizer_report=report,
+            source_lines=source.count("\\n") + 1,
+            errors=result.errors,
+        )
+        score_report = scorer.calculate()
+        print(score_report.score)
+        print(score_report.narrative)
+    """
+
+    def __init__(
+        self,
+        profiling_data: Optional[Dict[str, Any]],
+        optimizer_report: Optional[Any],  # OptimizationReport | None
+        source_lines: int = 1,
+        errors: Optional[List[str]] = None,
+    ) -> None:
+        self._profiling = profiling_data
+        self._optimizer = optimizer_report
+        self._source_lines = max(source_lines, 1)
+        self._errors = errors or []
+
+        # Pre-extract line_stats for convenience
+        self._line_stats: Dict[str, Any] = (
+            self._profiling.get("line_stats", {}) if self._profiling else {}
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def calculate(self) -> ScoreReport:
+        """
+        Calculate scores for all four dimensions and return a ScoreReport.
+        """
+        dims = DimensionScores()
+
+        # ── Correctness ───────────────────────────────────────────────
+        dims.correctness = self._score_correctness()
+
+        # ── Efficiency + Complexity ───────────────────────────────────
+        complexity_class, c_sub, e_sub, profiling_partial = (
+            self._score_efficiency_complexity()
+        )
+        dims.complexity_subscore = c_sub
+        dims.efficiency_subscore = e_sub
+        dims.efficiency_complexity = c_sub + e_sub
+        dims.profiling_partial = profiling_partial
+
+        # ── Quality ───────────────────────────────────────────────────
+        q_score, opt_partial = self._score_quality()
+        dims.quality = q_score
+        dims.optimizer_partial = opt_partial
+
+        # ── Maintainability ───────────────────────────────────────────
+        # optimizer_partial is already determined from quality calculation
+        dims.maintainability = self._score_maintainability()
+
+        # ── Final score ───────────────────────────────────────────────
+        total = (
+            dims.correctness
+            + dims.efficiency_complexity
+            + dims.quality
+            + dims.maintainability
+        )
+        final = max(0.0, min(100.0, total))
+
+        grade = _assign_grade(final)
+        narrative = _generate_narrative(final, dims)
+
+        # Supplementary info
+        cv = self._compute_cv()
+        lines_profiled = len(self._line_stats)
+
+        return ScoreReport(
+            score=round(final, 2),
+            grade=grade,
+            complexity_class=complexity_class,
+            dimensions=dims,
+            narrative=narrative,
+            error_count=len(self._errors),
+            lines_profiled=lines_profiled,
+            cv=round(cv, 4),
+        )
+
+    # ------------------------------------------------------------------
+    # Dimension calculations
+    # ------------------------------------------------------------------
+
+    def _score_correctness(self) -> float:
+        """
+        Correctness (0–35) derived directly from result.errors.
+
+        Scale:
+            0 errors  → 35.0
+            1 error   → 10.0
+            2+ errors →  0.0
+        """
+        n = len(self._errors)
+        if n == 0:
+            return 35.0
+        if n == 1:
+            return 10.0
+        return 0.0
+
+    def _score_efficiency_complexity(
+        self,
+    ) -> tuple[str, float, float, bool]:
+        """
+        Efficiency + Complexity dimension (0–30).
+
+        Returns:
+            (complexity_class, complexity_subscore, efficiency_subscore,
+             profiling_partial_flag)
+        """
+        if not self._line_stats:
+            # Profiling unavailable — partial credit
+            return "Unknown", PARTIAL_COMPLEXITY, PARTIAL_EFFICIENCY, True
+
+        complexity_class = _detect_complexity(self._line_stats)
+        c_sub = COMPLEXITY_POINTS.get(complexity_class, PARTIAL_COMPLEXITY)
+        e_sub = self._compute_efficiency_subscore()
+
+        return complexity_class, c_sub, e_sub, False
+
+    def _compute_efficiency_subscore(self) -> float:
+        """
+        Efficiency sub-score (0–15) using Coefficient of Variation.
+
+        CV = std / mean of line execution counts.
+        A flat execution profile (CV ≈ 0) scores maximum points.
+        A heavily spiked profile (high CV) scores minimum points.
+
+        Scale:
+            CV < 0.5  → 15
+            CV < 1.0  → 12
+            CV < 2.0  →  8
+            CV < 4.0  →  4
+            CV ≥ 4.0  →  0
+        """
+        cv = self._compute_cv()
+
+        if cv < 0.5:
+            return 15.0
+        if cv < 1.0:
+            return 12.0
+        if cv < 2.0:
+            return 8.0
+        if cv < 4.0:
+            return 4.0
+        return 0.0
+
+    def _compute_cv(self) -> float:
+        """
+        Coefficient of Variation of execution counts across all profiled lines.
+
+        Returns 0.0 when fewer than MIN_LINES_FOR_CV lines are available
+        (not enough data for a meaningful spread measure).
+        """
+        counts: List[int] = [
+            int(s.get("count", 0))
+            for s in self._line_stats.values()
+            if s.get("count", 0) > 0
+        ]
+        if len(counts) < MIN_LINES_FOR_CV:
+            return 0.0
+
+        mean = sum(counts) / len(counts)
+        if mean == 0.0:
+            return 0.0
+
+        variance = sum((c - mean) ** 2 for c in counts) / len(counts)
+        std = math.sqrt(variance)
+        return std / mean
+
+    def _score_quality(self) -> tuple[float, bool]:
+        """
+        Quality score (0–20) from optimizer suggestions that affect runtime.
+
+        Patterns: hot_loop, loop_invariant, repeated_computation,
+                  expensive_calls, dead_code, constant_folding.
+
+        Uses weighted density (weighted_issues / source_lines):
+            density = 0      → 20
+            density ≤ 0.3    → 16
+            density ≤ 0.6    → 12
+            density ≤ 1.0    →  7
+            density > 1.0    →  3
+
+        Returns:
+            (score, partial_credit_flag)
+        """
+        if self._optimizer is None:
+            return PARTIAL_QUALITY, True
+
+        suggestions = getattr(self._optimizer, "suggestions", [])
+        quality_suggestions = [s for s in suggestions if s.pattern in QUALITY_PATTERNS]
+
+        density = self._weighted_density(quality_suggestions)
+        return self._density_to_score(density, MAX_QUALITY), False
+
+    def _score_maintainability(self) -> float:
+        """
+        Maintainability score (0–15) from optimizer suggestions affecting
+        readability.
+
+        Patterns: unused_vars, early_return, string_concat_loop, nested_loops.
+
+        Same weighted density formula, mapped to 0–15.
+
+        Returns partial credit when optimizer is absent (already flagged by
+        _score_quality so no second flag needed here).
+        """
+        if self._optimizer is None:
+            return PARTIAL_MAINTAINABILITY
+
+        suggestions = getattr(self._optimizer, "suggestions", [])
+        maint_suggestions = [
+            s for s in suggestions if s.pattern in MAINTAINABILITY_PATTERNS
+        ]
+
+        density = self._weighted_density(maint_suggestions)
+        return self._density_to_score(density, MAX_MAINTAINABILITY)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _weighted_density(self, suggestions: List[Any]) -> float:
+        """
+        Compute weighted issue density relative to program size.
+
+        weighted = sum(3×high + 2×medium + 1×low)
+        density  = weighted / source_lines
+
+        The density is program-size-agnostic: a 5-line program and a
+        50-line program with the same number of issues produce different
+        densities, reflecting the proportional impact of the issues.
+        """
+        weighted = sum(
+            3 if s.severity == "high" else 2 if s.severity == "medium" else 1
+            for s in suggestions
+        )
+        return weighted / self._source_lines
+
+    @staticmethod
+    def _density_to_score(density: float, max_score: float) -> float:
+        """
+        Map a weighted issue density value to a score in [0, max_score].
+
+        Thresholds are defined as fractions of max_score so the same
+        mapping logic works for both Quality (max=20) and
+        Maintainability (max=15).
+
+        Density bands:
+            0         → 100 % of max
+            ≤ 0.3     →  80 %
+            ≤ 0.6     →  60 %
+            ≤ 1.0     →  35 %
+            > 1.0     →  15 %
+        """
+        if density == 0.0:
+            return max_score
+        if density <= 0.3:
+            return round(max_score * 0.80, 2)
+        if density <= 0.6:
+            return round(max_score * 0.60, 2)
+        if density <= 1.0:
+            return round(max_score * 0.35, 2)
+        return round(max_score * 0.15, 2)
+
+
+# ---------------------------------------------------------------------------
+# Grade and narrative (module-level helpers)
 # ---------------------------------------------------------------------------
 
 
 def _assign_grade(score: float) -> str:
+    """Map a numeric score to a grade label."""
     for threshold, grade in GRADE_THRESHOLDS:
         if score >= threshold:
             return grade
     return "Critical"
 
 
-def _round_dict(d: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively round floats in a dict for JSON serialisation."""
-    result: Dict[str, Any] = {}
-    for k, v in d.items():
-        if isinstance(v, float):
-            result[k] = round(v, 4)
-        elif isinstance(v, dict):
-            result[k] = _round_dict(v)
-        else:
-            result[k] = v
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Public API — primary entry point
-# ---------------------------------------------------------------------------
-
-
-def calculate_full_score(
-    source: str,
-    result: Any,
-    suggestions: Optional[List[Any]] = None,
-    ast: Optional[Any] = None,
-) -> ScoreReport:
+def _lowest_dimension(dims: DimensionScores) -> str:
     """
-    Calculate a full, context-aware score from source code and execution result.
+    Return the name of the dimension with the lowest percentage of its maximum.
 
-    This is the primary public entry point. It handles everything internally:
-    profiling data extraction, AST structural analysis, and all four scoring stages.
-
-    Parameters
-    ----------
-    source      : Original PyLite source code string
-    result      : ExecutionResult from execute(source)
-    suggestions : List of Suggestion objects from the Optimizer.
-                  When None, the scorer runs without issue-density data.
-    ast         : Parsed ProgramNode (optional). When provided, enables full
-                  structural analysis (function length, nesting, branching).
-                  When None, structural sub-scores return neutral values.
-
-    Returns
-    -------
-    ScoreReport with final_score (0–100), grade, program_type,
-    dimension_scores, applied_weights, narrative, and full breakdown.
-
-    Example
-    -------
-    ::
-        from optilang import execute
-        from optilang.scoring import calculate_full_score
-
-        source = \"\"\"
-        def factorial(n):
-            if n <= 1:
-                return 1
-            return n * factorial(n - 1)
-        print(factorial(10))
-        \"\"\"
-        result = execute(source)
-        report = calculate_full_score(source, result)
-
-        print(report.final_score)      # e.g. 82.4
-        print(report.grade)            # "Good"
-        print(report.program_type)     # "recursive_computation"
-        print(report.dimension_scores) # {
-                                            "efficiency": 88,
-                                            "quality": 79,
-                                            "complexity": 80
-                                        }
-        print(report.applied_weights)  # {
-                                            "efficiency": 0.25,
-                                            "quality": 0.35,
-                                            "complexity": 0.40
-                                        }
-        print(report.narrative)        # plain-language explanation
-        print(report.to_dict())        # full JSON-serialisable output
+    Comparing raw scores directly would be unfair because the dimensions have
+    different maximums (35, 30, 20, 15). Normalising to a percentage puts
+    them on the same scale so the narrative points to the genuinely weakest
+    area.
     """
-    profiling_data = (
-        result.profiling.to_dict()
-        if result.profiling is not None
-        else {
-            "line_stats": {},
-            "function_stats": {},
-            "total_time_ms": 0.0,
-            "total_lines": 0,
-            "lines_profiled": 0,
-        }
-    )
+    ratios = {
+        "Correctness": dims.correctness / MAX_CORRECTNESS,
+        "Efficiency & Complexity": dims.efficiency_complexity
+        / MAX_EFFICIENCY_COMPLEXITY,
+        "Quality": dims.quality / MAX_QUALITY,
+        "Maintainability": dims.maintainability / MAX_MAINTAINABILITY,
+    }
+    return min(ratios, key=lambda k: ratios[k])
 
-    # Count non-blank, non-comment source lines
-    source_lines = sum(
-        1
-        for line in source.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    )
 
-    function_stats: Dict[str, Any] = cast(
-        Dict[str, Any], profiling_data.get("function_stats") or {}
-    )
+def _generate_narrative(score: float, dims: DimensionScores) -> str:
+    """
+    Generate a short, beginner-friendly explanation of the score.
 
-    return DynamicScorer(
-        profiling_data=profiling_data,
-        suggestions=suggestions or [],
-        total_source_lines=max(source_lines, 1),
-        function_stats=function_stats,
-        ast=ast,
-    ).calculate()
+    The narrative:
+        1. Opens with a grade-appropriate headline.
+        2. Names the single lowest-scoring dimension.
+        3. Gives one concrete action to improve.
+        4. Notes partial credit if applicable.
+    """
+    lowest = _lowest_dimension(dims)
+
+    # Per-dimension improvement hints
+    hints: Dict[str, str] = {
+        "Correctness": (
+            "Focus on fixing the errors in your program first. "
+            "A program that runs without errors is the foundation of "
+            "everything else."
+        ),
+        "Efficiency & Complexity": (
+            "Look at how many times each line of your program runs. "
+            "Nested loops (a loop inside a loop) cause lines to run "
+            "exponentially more times and are the most common cause of "
+            "poor efficiency."
+        ),
+        "Quality": (
+            "Review the optimization suggestions — particularly any "
+            "hot loops, loop-invariant computations, or repeated "
+            "expressions. Moving work outside of loops is usually "
+            "the highest-impact change you can make."
+        ),
+        "Maintainability": (
+            "Look for unused variables, deeply nested loops, and "
+            "opportunities to return early from functions. "
+            "Cleaner structure makes code easier to reason about and "
+            "often reveals further optimizations."
+        ),
+    }
+
+    partial_note = ""
+    if dims.profiling_partial and dims.optimizer_partial:
+        partial_note = (
+            " Note: profiling and optimizer data were unavailable, "
+            "so partial credit was awarded for Efficiency, Complexity, "
+            "Quality, and Maintainability."
+        )
+    elif dims.profiling_partial:
+        partial_note = (
+            " Note: profiling data was unavailable, so partial credit "
+            "was awarded for Efficiency and Complexity."
+        )
+    elif dims.optimizer_partial:
+        partial_note = (
+            " Note: optimizer data was unavailable, so partial credit "
+            "was awarded for Quality and Maintainability."
+        )
+
+    if score >= 90:
+        headline = (
+            "Excellent work! Your program is correct, efficient, and "
+            "well-structured. "
+        )
+        body = (
+            f"Your weakest area is {lowest} — keep it in mind as your "
+            f"programs grow more complex."
+        )
+
+    elif score >= 75:
+        headline = "Good job! Your program runs well and shows solid structure. "
+        body = f"Your main area to improve is {lowest}. " f"{hints[lowest]}"
+
+    elif score >= 60:
+        headline = (
+            "Fair result. Your program works, but there are clear "
+            "opportunities to improve it. "
+        )
+        body = (
+            f"Start with {lowest} — it had the biggest impact on your score. "
+            f"{hints[lowest]}"
+        )
+
+    elif score >= 40:
+        headline = "Your program needs some work. "
+        body = (
+            f"The most important thing to address right now is {lowest}. "
+            f"{hints[lowest]}"
+        )
+
+    else:
+        headline = "Your program has significant issues that need to be resolved. "
+        body = f"Begin with {lowest} — this is the foundation. " f"{hints[lowest]}"
+
+    return headline + body + partial_note
 
 
 # ---------------------------------------------------------------------------
-# Backwards-compatible API
+# Convenience function — public API
 # ---------------------------------------------------------------------------
 
 
 def calculate_score(
-    profiling_data: Dict[str, Any],
-    suggestions: Optional[List[Any]] = None,
-    total_source_lines: int = 1,
-    function_stats: Optional[Dict[str, Any]] = None,
-    ast: Optional[Any] = None,
+    profiling_data: Optional[Dict[str, Any]],
+    optimizer_report: Optional[Any] = None,
+    source_lines: int = 1,
+    errors: Optional[List[str]] = None,
 ) -> ScoreReport:
     """
-    Backwards-compatible scoring entry point.
+    Calculate a four-dimension optimization score.
 
-    Accepts the same arguments as the original calculate_score() so that
-    all existing code continues to work without modification.
+    This is the primary public entry point for the scoring system.
 
-    For new code, prefer calculate_full_score(source, result) which handles
-    all setup automatically.
-    """
-    return DynamicScorer(
-        profiling_data=profiling_data,
-        suggestions=suggestions,
-        total_source_lines=total_source_lines,
-        function_stats=function_stats,
-        ast=ast,
-    ).calculate()
+    Args:
+        profiling_data:    Dict from ``ProfilingData.to_dict()``, or None.
+        optimizer_report:  ``OptimizationReport`` from ``Optimizer.run()``, or None.
+        source_lines:      Number of lines in the original source code.
+        errors:            List of error strings from ``ExecutionResult.errors``.
 
+    Returns:
+        ``ScoreReport`` with final score, grade, complexity class,
+        per-dimension scores, and a beginner-friendly narrative.
 
-class Scorer(DynamicScorer):
-    """
-    Backwards-compatible Scorer class.
+    Example::
 
-    Preserves the original Scorer(profiling_data, suggestions,
-    total_source_lines).calculate() interface so that existing tests
-    and calling code need no changes.
-    """
+        from optilang import execute
+        from optilang.lexer import tokenize
+        from optilang.parser import parse
+        from optilang.optimizer import Optimizer
+        from optilang.scoring import calculate_score
 
-    def __init__(
-        self,
-        profiling_data: Dict[str, Any],
-        suggestions: Optional[List[Any]] = None,
-        total_source_lines: int = 1,
-        function_stats: Optional[Dict[str, Any]] = None,
-        ast: Optional[Any] = None,
-    ) -> None:
-        super().__init__(
-            profiling_data=profiling_data,
-            suggestions=suggestions,
-            total_source_lines=total_source_lines,
-            function_stats=function_stats,
-            ast=ast,
+        source = "for i in range(100):\\n    for j in range(100):\\n        x = i+j"
+        result = execute(source)
+        ast    = parse(tokenize(source))
+        report = Optimizer(ast, result.profiling, result.symbol_table).run()
+
+        score_report = calculate_score(
+            profiling_data=result.profiling.to_dict() if result.profiling else None,
+            optimizer_report=report,
+            source_lines=source.count("\\n") + 1,
+            errors=result.errors,
         )
+
+        print(score_report.score)            # e.g. 61.0
+        print(score_report.grade)            # "Fair"
+        print(score_report.complexity_class) # "O(n²)"
+        print(score_report.narrative)        # beginner explanation
+        print(score_report.to_dict())        # full JSON-serialisable output
+    """
+    return Scorer(
+        profiling_data=profiling_data,
+        optimizer_report=optimizer_report,
+        source_lines=source_lines,
+        errors=errors,
+    ).calculate()

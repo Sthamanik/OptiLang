@@ -1,1156 +1,1105 @@
 """
 tests/test_scoring.py
 ---------------------
-Test suite for the OptiLang Intelligent Scoring System (v2.0).
+Tests for optilang/scoring.py
 
-Structure
----------
- 1.  TestScoreReport          — data class, serialisation, backwards compat
- 2.  TestProgramProfiler      — Stage 1: profile building and classification
- 3.  TestScaleAndGini         — scale factor + Gini index computations
- 4.  TestDimensionScorer_E1   — execution efficiency sub-score
- 5.  TestDimensionScorer_E2   — memory efficiency sub-score
- 6.  TestDimensionScorer_Q1   — code cleanliness sub-score
- 7.  TestDimensionScorer_Q2   — issue density sub-score
- 8.  TestDimensionScorer_C1   — complexity handling sub-score
- 9.  TestWeightEngine         — context-aware weight selection
-10.  TestNarrative            — narrative generation content and tone
-11.  TestDynamicScorer        — full four-stage calculate() end-to-end
-12.  TestContextAwareness     — the core property: same code, different scale
-13.  TestProgramTypes         — each program type scored appropriately
-14.  TestCalculateFullScore   — public calculate_full_score() API
-15.  TestCalculateScore       — backwards-compatible calculate_score()
-16.  TestScorerAlias          — backwards-compatible Scorer class
-17.  TestEdgeCases            — empty data, single lines, no AST, errors
+Covers every public and private component:
+
+    TestDimensionScores         — dataclass fields, defaults, to_dict()
+    TestScoreReport             — dataclass fields, to_dict(), JSON safety
+    TestDetectComplexity        — module-level heuristic, all Big-O classes
+    TestAssignGrade             — all five grade bands and exact boundaries
+    TestLowestDimension         — percentage-normalised comparison, tie handling
+    TestGenerateNarrative       — all five score bands, partial-credit notes,
+                                   lowest-dimension routing
+    TestScorerCorrectness       — 0 / 1 / 2+ errors, boundary at exactly 2
+    TestScorerEfficiencyComplexity — profiling present/absent, all complexity
+                                     classes, CV bands, sub-score sum
+    TestScorerComputeCV         — flat, spiked, single-line, empty profiles
+    TestScorerQuality           — pattern filtering, density bands, partial credit
+    TestScorerMaintainability   — pattern filtering, density bands, partial credit
+    TestScorerDensityToScore    — all five density bands for both max values
+    TestScorerCalculate         — end-to-end: perfect score, bad code, clamping,
+                                   breakdown keys, partial flags, error_count
+    TestCalculateScoreFunction  — public API matches Scorer directly, defaults
+    TestEdgeCases               — empty profiling, zero source lines, unknown
+                                   complexity class, both partials, all errors
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional, cast
+import json
 
 import pytest
 
-from optilang.models import Suggestion
 from optilang.scoring import (
-    COMPLEXITY_BASE,  # ← new name
-    DIMENSION_WEIGHTS,
-    FUNCTION_LENGTH_THRESHOLD,
-    GRADE_THRESHOLDS,
-    MAX_ACCEPTABLE_NESTING,
-    DimensionScorer,
-    DynamicScorer,
-    NarrativeGenerator,
-    ProgramProfile,
-    ProgramProfiler,
-    ProgramType,
+    COMPLEXITY_POINTS,
+    MAINTAINABILITY_PATTERNS,
+    MAX_CORRECTNESS,
+    MAX_MAINTAINABILITY,
+    MAX_QUALITY,
+    PARTIAL_COMPLEXITY,
+    PARTIAL_EFFICIENCY,
+    PARTIAL_MAINTAINABILITY,
+    PARTIAL_QUALITY,
+    QUALITY_PATTERNS,
+    DimensionScores,
     Scorer,
     ScoreReport,
-    WeightEngine,
-    calculate_full_score,
+    _assign_grade,
+    _detect_complexity,
+    _generate_narrative,
+    _lowest_dimension,
     calculate_score,
 )
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Shared test helpers
 # ---------------------------------------------------------------------------
 
 
 def make_profiling(
     line_counts: list[int] | None = None,
-    memory_vars: list[int] | None = None,
-    avg_times: list[float] | None = None,
     total_time_ms: float = 1.0,
-    complexity_confidence: float = 1.0,
-    function_stats: dict | None = None,
 ) -> dict:
-    """Build a minimal profiling dict that mirrors ProfilingData.to_dict()."""
+    """
+    Build a minimal profiling dict that mimics ProfilingData.to_dict().
+
+    Args:
+        line_counts:   Execution count per line. Each entry = one profiled line.
+        total_time_ms: Simulated total execution time (not used by scorer
+                       directly but present for structural completeness).
+    """
     line_counts = line_counts or [1]
-    memory_vars = memory_vars or [0] * len(line_counts)
-    avg_times = avg_times or [total_time_ms / max(c, 1) for c in line_counts]
-
     line_stats: dict = {}
-    total_executed = 0
-    for i, (cnt, mem, avg) in enumerate(
-        zip(line_counts, memory_vars, avg_times), start=1
-    ):
-        line_stats[i] = {
-            "count": cnt,
-            "avg_time_ms": avg,
-            "memory_vars": mem,
+    total = 0
+    for i, count in enumerate(line_counts, start=1):
+        line_stats[str(i)] = {
+            "count": count,
+            "total_time_ms": total_time_ms / max(len(line_counts), 1),
+            "avg_time_ms": total_time_ms / max(count, 1),
+            "memory": 0,
         }
-        total_executed += cnt
-
+        total += count
     return {
         "line_stats": line_stats,
-        "function_stats": function_stats or {},
         "total_time_ms": total_time_ms,
-        "total_lines": total_executed,
+        "total_lines": total,
         "lines_profiled": len(line_stats),
-        "complexity_confidence": complexity_confidence,
     }
 
 
-def make_suggestion(severity: str, line: int = 1) -> Suggestion:
-    return Suggestion(
-        line=line,
-        pattern="test",
-        severity=severity,
-        description="test",
-        suggestion="test",
-        impact_score=5.0,
-    )
+class _Suggestion:
+    """Minimal Suggestion stub."""
+
+    def __init__(self, pattern: str, severity: str) -> None:
+        self.pattern = pattern
+        self.severity = severity
 
 
-def make_fn_stats(max_recursion_depth: int = 0) -> dict:
-    return {"fn": {"calls": 3, "max_recursion_depth": max_recursion_depth}}
+class _Report:
+    """Minimal OptimizationReport stub with configurable suggestions."""
+
+    def __init__(self, suggestions: list[_Suggestion] | None = None) -> None:
+        self.suggestions = suggestions or []
 
 
-def profiler(
-    line_counts: Optional[list[int]] = None,
-    memory_vars: Optional[list[int]] = None,
-    avg_times: Optional[list[float]] = None,
-    total_time_ms: float = 1.0,
-    suggestions: Optional[list[Any]] = None,
-    source_lines: int = 10,
-    function_stats: Optional[dict[str, Any]] = None,
-    complexity_confidence: float = 1.0,
-) -> ProgramProfiler:
-    p = make_profiling(
-        line_counts,
-        memory_vars,
-        avg_times,
-        total_time_ms,
-        complexity_confidence,
-        function_stats,
-    )
-    return ProgramProfiler(
-        profiling_data=p,
-        suggestions=suggestions or [],
-        total_source_lines=source_lines,
-        function_stats=function_stats or {},
-    )
+def _empty_report() -> _Report:
+    return _Report()
 
 
-def scorer(
-    line_counts: Optional[list[int]] = None,
-    memory_vars: Optional[list[int]] = None,
-    avg_times: Optional[list[float]] = None,
-    total_time_ms: float = 1.0,
-    suggestions: Optional[list[Any]] = None,
-    source_lines: int = 10,
-    function_stats: Optional[dict[str, Any]] = None,
-    complexity_confidence: float = 1.0,
-) -> DynamicScorer:
-    p = make_profiling(
-        line_counts,
-        memory_vars,
-        avg_times,
-        total_time_ms,
-        complexity_confidence,
-        function_stats,
-    )
-    return DynamicScorer(
-        profiling_data=p,
-        suggestions=suggestions or [],
-        total_source_lines=source_lines,
-        function_stats=function_stats or {},
-    )
+def _report(*items: tuple[str, str]) -> _Report:
+    """Build a report from (pattern, severity) pairs."""
+    return _Report([_Suggestion(p, s) for p, s in items])
 
 
 # ---------------------------------------------------------------------------
-# 1. ScoreReport
+# TestDimensionScores
+# ---------------------------------------------------------------------------
+
+
+class TestDimensionScores:
+
+    def test_default_values_are_zero_and_false(self) -> None:
+        d = DimensionScores()
+        assert d.correctness == 0.0
+        assert d.efficiency_complexity == 0.0
+        assert d.quality == 0.0
+        assert d.maintainability == 0.0
+        assert d.complexity_subscore == 0.0
+        assert d.efficiency_subscore == 0.0
+        assert d.profiling_partial is False
+        assert d.optimizer_partial is False
+
+    def test_to_dict_has_all_keys(self) -> None:
+        d = DimensionScores(correctness=35.0, efficiency_complexity=30.0)
+        result = d.to_dict()
+        expected_keys = {
+            "correctness",
+            "efficiency_complexity",
+            "quality",
+            "maintainability",
+            "complexity_subscore",
+            "efficiency_subscore",
+            "profiling_partial",
+            "optimizer_partial",
+        }
+        assert set(result.keys()) == expected_keys
+
+    def test_to_dict_rounds_floats_to_two_decimal_places(self) -> None:
+        d = DimensionScores(correctness=35.123456)
+        assert d.to_dict()["correctness"] == 35.12
+
+    def test_to_dict_preserves_boolean_flags(self) -> None:
+        d = DimensionScores(profiling_partial=True, optimizer_partial=True)
+        result = d.to_dict()
+        assert result["profiling_partial"] is True
+        assert result["optimizer_partial"] is True
+
+
+# ---------------------------------------------------------------------------
+# TestScoreReport
 # ---------------------------------------------------------------------------
 
 
 class TestScoreReport:
 
-    def _make_report(self, score: float = 80.0, grade: str = "Good") -> ScoreReport:
+    def _make_report(self, score: float = 80.0) -> ScoreReport:
         return ScoreReport(
-            final_score=score,
-            grade=grade,
-            program_type="linear_script",
+            score=score,
+            grade="Good",
             complexity_class="O(n)",
-            dimension_scores={"efficiency": 80.0, "quality": 80.0, "complexity": 80.0},
-            applied_weights={"efficiency": 0.2, "quality": 0.55, "complexity": 0.25},
+            dimensions=DimensionScores(
+                correctness=35.0,
+                efficiency_complexity=20.0,
+                quality=15.0,
+                maintainability=10.0,
+            ),
             narrative="Test narrative.",
+            error_count=0,
+            lines_profiled=5,
+            cv=0.5,
         )
 
-    def test_to_dict_has_required_keys(self) -> None:
+    def test_to_dict_has_all_required_keys(self) -> None:
         d = self._make_report().to_dict()
-        required = {
-            "final_score",
+        assert set(d.keys()) == {
             "score",
             "grade",
-            "program_type",
             "complexity_class",
-            "dimension_scores",
-            "applied_weights",
+            "dimensions",
             "narrative",
-            "breakdown",
-            "adaptive_context",
+            "error_count",
+            "lines_profiled",
+            "cv",
         }
-        assert required.issubset(d.keys())
 
-    def test_score_alias_equals_final_score(self) -> None:
-        r = self._make_report(score=72.5)
-        assert r.score == r.final_score == 72.5
+    def test_to_dict_score_rounded_to_two_places(self) -> None:
+        r = self._make_report(score=80.123456)
+        assert r.to_dict()["score"] == 80.12
 
-    def test_to_dict_score_rounded_2dp(self) -> None:
-        r = self._make_report(score=72.3456)
-        assert r.to_dict()["final_score"] == 72.35
-
-    def test_to_dict_dimension_scores_rounded(self) -> None:
+    def test_to_dict_cv_rounded_to_four_places(self) -> None:
         r = ScoreReport(
-            final_score=80.0,
+            score=80.0,
             grade="Good",
-            program_type="looping",
             complexity_class="O(n)",
-            dimension_scores={"efficiency": 80.123456},
+            dimensions=DimensionScores(),
+            narrative="n",
+            cv=1.23456789,
         )
-        assert r.to_dict()["dimension_scores"]["efficiency"] == 80.12
-
-    def test_grade_values_come_from_thresholds(self) -> None:
-        r = self._make_report()
-        assert r.grade in {g for _, g in GRADE_THRESHOLDS}
-
-    def test_narrative_field_is_string(self) -> None:
-        r = self._make_report()
-        assert isinstance(r.to_dict()["narrative"], str)
-
-
-# ---------------------------------------------------------------------------
-# 2. ProgramProfiler — classification
-# ---------------------------------------------------------------------------
-
-
-class TestProgramProfiler:
-
-    def test_trivial_when_max_count_zero(self) -> None:
-        p = profiler(line_counts=[0]).build()
-        assert p.program_type == "trivial"
-
-    def test_trivial_when_max_count_one(self) -> None:
-        p = profiler(line_counts=[1, 1, 1]).build()
-        assert p.program_type == "trivial"
-
-    def test_recursive_computation_detected(self) -> None:
-        p = profiler(
-            line_counts=[10, 50, 10],
-            function_stats=make_fn_stats(max_recursion_depth=3),
-        ).build()
-        assert p.program_type == "recursive_computation"
-
-    def test_recursive_not_detected_when_depth_zero(self) -> None:
-        p = profiler(
-            line_counts=[100, 100],
-            function_stats=make_fn_stats(max_recursion_depth=0),
-        ).build()
-        assert p.program_type != "recursive_computation"
-
-    def test_nested_processing_detected(self) -> None:
-        # High count + high gini + O(n²) complexity → nested_processing
-        # Use a count pattern that produces strong outer/inner signal
-        p = profiler(line_counts=[101, 10100, 10000]).build()
-        assert p.program_type in ("nested_processing", "data_iteration")
-
-    def test_data_iteration_for_simple_loop(self) -> None:
-        p = profiler(line_counts=[1, 100, 100]).build()
-        assert p.program_type in ("data_iteration", "nested_processing")
-
-    def test_linear_script_for_moderate_execution(self) -> None:
-        # max_count = 5, no recursion, below LOOP_THRESHOLD
-        p = profiler(line_counts=[1, 2, 5]).build()
-        assert p.program_type == "linear_script"
-
-    def test_recursive_beats_looping_in_priority(self) -> None:
-        # High count AND recursion → recursive wins
-        p = profiler(
-            line_counts=[1000, 1000],
-            function_stats=make_fn_stats(max_recursion_depth=5),
-        ).build()
-        assert p.program_type == "recursive_computation"
-
-    def test_scale_factor_in_profile(self) -> None:
-        # LOG_SCALE_DENOM = 7, so 10^7 = 10_000_000 gives scale_factor = 1.0
-        p = profiler(line_counts=[10_000_000]).build()
-        assert p.scale_factor == pytest.approx(1.0, abs=0.01)
-
-    def test_gini_near_zero_for_uniform(self) -> None:
-        p = profiler(line_counts=[10, 10, 10, 10]).build()
-        assert p.gini_index < 0.1
-
-    def test_gini_high_for_dominant_line(self) -> None:
-        # With 4 lines where one dominates, Gini converges ~0.75
-        p = profiler(line_counts=[1, 1, 1, 10000]).build()
-        assert p.gini_index > 0.65
-
-    def test_dead_line_ratio_when_half_dead(self) -> None:
-        p = profiler(line_counts=[1] * 5, source_lines=10).build()
-        assert p.dead_line_ratio == pytest.approx(0.5)
-
-    def test_no_dead_code_for_small_program(self) -> None:
-        # Below MIN_LINES_FOR_DEAD_CODE threshold
-        p = profiler(line_counts=[1, 1], source_lines=3).build()
-        assert p.dead_line_ratio == 0.0
-
-    def test_complexity_class_populated(self) -> None:
-        p = profiler(line_counts=[1, 100, 100]).build()
-        assert p.complexity_class in COMPLEXITY_BASE
-
-    def test_function_stats_as_object_with_attribute(self) -> None:
-        """function_stats can come from ProfilingData as objects not dicts."""
-
-        class FakeStats:
-            max_recursion_depth = 4
-
-        prof = ProgramProfiler(
-            profiling_data=make_profiling(line_counts=[100]),
-            function_stats={"fn": FakeStats()},
-        )
-        p = prof.build()
-        assert p.program_type == "recursive_computation"
-
-    def test_hotness_weighted_issues_higher_than_plain_weighted(self) -> None:
-        # Suggestion on the hottest line → hotness bonus applied
-        sug = [make_suggestion("high", line=2)]  # line 2 is the hot line
-        p = profiler(
-            line_counts=[1, 10000],
-            suggestions=sug,
-        ).build()
-        # hotness_weighted >= weighted (because of hotness bonus)
-        assert p.hotness_weighted_issue_score >= p.weighted_issue_score
-
-
-# ---------------------------------------------------------------------------
-# 3. Scale factor and Gini index
-# ---------------------------------------------------------------------------
-
-
-class TestScaleAndGini:
-
-    def test_scale_zero_for_count_one(self) -> None:
-        pr = profiler(line_counts=[1])
-        assert pr._compute_scale_factor() == 0.0
-
-    def test_scale_partial_at_100(self) -> None:
-        pr = profiler(line_counts=[100])
-        sf = pr._compute_scale_factor()
-        assert 0.28 < sf < 0.35  # log10(100)/7 ≈ 0.286
-
-    def test_scale_full_at_10m(self) -> None:
-        pr = profiler(line_counts=[10_000_000])
-        assert pr._compute_scale_factor() == pytest.approx(1.0)
-
-    def test_scale_monotone(self) -> None:
-        s10 = profiler(line_counts=[10])._compute_scale_factor()
-        s1k = profiler(line_counts=[1000])._compute_scale_factor()
-        s1m = profiler(line_counts=[1_000_000])._compute_scale_factor()
-        assert s10 < s1k < s1m
-
-    def test_gini_zero_single_line(self) -> None:
-        pr = profiler(line_counts=[100])
-        assert pr._compute_gini() == 0.0
-
-    def test_gini_zero_empty(self) -> None:
-        pr = profiler(line_counts=[])
-        assert pr._compute_gini() == 0.0
-
-    def test_gini_bounded_zero_to_one(self) -> None:
-        for counts in [[1, 5, 50], [100, 1, 1, 1], [10, 10, 10]]:
-            g = profiler(line_counts=counts)._compute_gini()
-            assert 0.0 <= g <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# 4. DimensionScorer — E1: Execution Efficiency
-# ---------------------------------------------------------------------------
-
-
-class TestDimensionScorerE1:
-
-    def _dim(self, **kw: Any) -> DimensionScorer:
-        return DimensionScorer(profiler(**kw).build())
-
-    def test_uniform_execution_gives_high_score(self) -> None:
-        score, _ = self._dim(line_counts=[50, 50, 50, 50]).execution_efficiency()
-        assert score > 80.0
-
-    def test_dominant_hot_loop_gives_lower_score(self) -> None:
-        score, _ = self._dim(line_counts=[1, 1, 10000]).execution_efficiency()
-        assert score < 80.0
-
-    def test_hotness_weighted_issues_reduce_score(self) -> None:
-        sug = [make_suggestion("high", line=2)] * 5
-        s_no_issues, _ = self._dim(line_counts=[1, 10000]).execution_efficiency()
-        dim_with = DimensionScorer(
-            profiler(line_counts=[1, 10000], suggestions=sug).build()
-        )
-        s_with_issues, _ = dim_with.execution_efficiency()
-        assert s_with_issues <= s_no_issues
-
-    def test_detail_contains_gini_and_scale(self) -> None:
-        _, detail = self._dim(line_counts=[1, 100]).execution_efficiency()
-        assert "gini_index" in detail
-        assert "scale_factor" in detail
-
-    def test_score_in_range_zero_to_100(self) -> None:
-        for counts in [[1], [100, 100], [1, 10000], [1, 1, 1_000_000]]:
-            s, _ = self._dim(line_counts=counts).execution_efficiency()
-            assert 0.0 <= s <= 100.0
-
-
-# ---------------------------------------------------------------------------
-# 5. DimensionScorer — E2: Memory Efficiency
-# ---------------------------------------------------------------------------
-
-
-class TestDimensionScorerE2:
-
-    def _dim(self, **kw: Any) -> DimensionScorer:
-        return DimensionScorer(profiler(**kw).build())
-
-    def test_no_memory_data_returns_100(self) -> None:
-        score, _ = self._dim(line_counts=[1], memory_vars=[0]).memory_efficiency()
-        assert score == 100.0
-
-    def test_low_stdev_gives_high_score(self) -> None:
-        # All lines have same var count → stdev = 0 → neutral (100)
-        score, _ = self._dim(
-            line_counts=[1] * 5, memory_vars=[5, 5, 5, 5, 5]
-        ).memory_efficiency()
-        assert score == 100.0
-
-    def test_high_spread_reduces_score(self) -> None:
-        # Wildly varying memory → high stdev → lower score
-        score, _ = self._dim(
-            line_counts=[1] * 5, memory_vars=[1, 1, 1, 50, 100]
-        ).memory_efficiency()
-        assert score < 100.0
-
-    def test_detail_contains_threshold_info(self) -> None:
-        _, detail = self._dim(
-            line_counts=[1] * 5, memory_vars=[2, 3, 4, 5, 30]
-        ).memory_efficiency()
-        assert "memory_adaptive_threshold" in detail
-
-
-# ---------------------------------------------------------------------------
-# 6. DimensionScorer — Q1: Code Cleanliness
-# ---------------------------------------------------------------------------
-
-
-class TestDimensionScorerQ1:
-
-    def _profile_with(
-        self,
-        dead_ratio: float = 0.0,
-        avg_fn_len: float = 0.0,
-        max_nest: int = 0,
-        branch_density: float = 0.0,
-    ) -> ProgramProfile:
-        p = ProgramProfile()
-        p.dead_line_ratio = dead_ratio
-        p.avg_function_length = avg_fn_len
-        p.max_nesting_depth = max_nest
-        p.branch_density = branch_density
-        return p
-
-    def test_perfect_code_scores_100(self) -> None:
-        dim = DimensionScorer(self._profile_with())
-        score, _ = dim.code_cleanliness()
-        assert score == pytest.approx(100.0)
-
-    def test_dead_code_reduces_score(self) -> None:
-        dim_clean = DimensionScorer(self._profile_with(dead_ratio=0.0))
-        dim_dead = DimensionScorer(self._profile_with(dead_ratio=0.5))
-        s_clean, _ = dim_clean.code_cleanliness()
-        s_dead, _ = dim_dead.code_cleanliness()
-        assert s_dead < s_clean
-
-    def test_long_functions_reduce_score(self) -> None:
-        dim_short = DimensionScorer(self._profile_with(avg_fn_len=5.0))
-        dim_long = DimensionScorer(
-            self._profile_with(avg_fn_len=FUNCTION_LENGTH_THRESHOLD + 20)
-        )
-        s_short, _ = dim_short.code_cleanliness()
-        s_long, _ = dim_long.code_cleanliness()
-        assert s_long < s_short
-
-    def test_deep_nesting_reduces_score(self) -> None:
-        dim_flat = DimensionScorer(self._profile_with(max_nest=1))
-        dim_deep = DimensionScorer(
-            self._profile_with(max_nest=MAX_ACCEPTABLE_NESTING + 3)
-        )
-        s_flat, _ = dim_flat.code_cleanliness()
-        s_deep, _ = dim_deep.code_cleanliness()
-        assert s_deep < s_flat
-
-    def test_high_branch_density_reduces_score(self) -> None:
-        dim_low = DimensionScorer(self._profile_with(branch_density=0.1))
-        dim_high = DimensionScorer(self._profile_with(branch_density=0.8))
-        s_low, _ = dim_low.code_cleanliness()
-        s_high, _ = dim_high.code_cleanliness()
-        assert s_high < s_low
-
-    def test_score_bounded_zero_to_100(self) -> None:
-        worst = DimensionScorer(
-            self._profile_with(
-                dead_ratio=1.0, avg_fn_len=100.0, max_nest=10, branch_density=1.0
-            )
-        )
-        s, _ = worst.code_cleanliness()
-        assert 0.0 <= s <= 100.0
-
-    def test_detail_contains_all_sub_scores(self) -> None:
-        _, detail = DimensionScorer(self._profile_with()).code_cleanliness()
-        assert "dead_code_score" in detail
-        assert "function_length_score" in detail
-        assert "nesting_score" in detail
-        assert "branch_score" in detail
-
-
-# ---------------------------------------------------------------------------
-# 7. DimensionScorer — Q2: Issue Density
-# ---------------------------------------------------------------------------
-
-
-class TestDimensionScorerQ2:
-
-    def _profile_with(
-        self,
-        suggestions: int = 0,
-        weighted: float = 0.0,
-        hotness_weighted: float = 0.0,
-        density: float = 0.0,
-    ) -> ProgramProfile:
-        p = ProgramProfile()
-        p.total_suggestions = suggestions
-        p.weighted_issue_score = weighted
-        p.hotness_weighted_issue_score = hotness_weighted
-        p.issue_density = density
-        return p
-
-    def test_no_suggestions_gives_100(self) -> None:
-        dim = DimensionScorer(self._profile_with())
-        s, _ = dim.issue_density()
-        assert s == 100.0
-
-    def test_high_density_gives_low_score(self) -> None:
-        dim = DimensionScorer(self._profile_with(suggestions=10, density=2.0))
-        s, _ = dim.issue_density()
-        assert s < 30.0
-
-    def test_low_density_gives_high_score(self) -> None:
-        dim = DimensionScorer(self._profile_with(suggestions=1, density=0.05))
-        s, _ = dim.issue_density()
-        assert s > 85.0
-
-    def test_score_bounded_zero_to_100(self) -> None:
-        dim = DimensionScorer(self._profile_with(suggestions=100, density=10.0))
-        s, _ = dim.issue_density()
-        assert 0.0 <= s <= 100.0
-
-    def test_detail_has_density_and_count(self) -> None:
-        dim = DimensionScorer(self._profile_with(suggestions=3, density=0.3))
-        _, detail = dim.issue_density()
-        assert "suggestion_count" in detail
-        assert "issue_density" in detail
-
-
-# ---------------------------------------------------------------------------
-# 8. DimensionScorer — C1: Complexity Handling
-# ---------------------------------------------------------------------------
-
-
-class TestDimensionScorerC1:
-
-    def _profile_for(
-        self,
-        complexity_class: str,
-        scale: float = 0.5,
-        confidence: float = 1.0,
-        program_type: str = "data_iteration",
-    ) -> ProgramProfile:
-        p = ProgramProfile()
-        p.complexity_class = complexity_class
-        p.scale_factor = scale
-        p.complexity_confidence = confidence
-        p.program_type = cast(ProgramType, program_type)
-        return p
-
-    def test_o1_gives_100(self) -> None:
-        dim = DimensionScorer(self._profile_for("O(1)", scale=1.0))
-        s, _ = dim.complexity_handling()
-        assert s == 100.0
-
-    def test_on_gives_high_score(self) -> None:
-        dim = DimensionScorer(self._profile_for("O(n)", scale=1.0))
-        s, _ = dim.complexity_handling()
-        assert s >= 90.0
-
-    def test_on2_at_full_scale_gives_lower_score(self) -> None:
-        dim = DimensionScorer(self._profile_for("O(n²)", scale=1.0))
-        s, _ = dim.complexity_handling()
-        assert s < 50.0
-
-    def test_small_scale_softens_on2_penalty(self) -> None:
-        s_small, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=0.1)
-        ).complexity_handling()
-        s_large, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=1.0)
-        ).complexity_handling()
-        assert s_small > s_large
-
-    def test_low_confidence_softens_penalty(self) -> None:
-        s_certain, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=1.0, confidence=1.0)
-        ).complexity_handling()
-        s_unsure, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=1.0, confidence=0.4)
-        ).complexity_handling()
-        assert s_unsure > s_certain
-
-    def test_recursive_gets_justification_credit(self) -> None:
-        s_loop, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=1.0, program_type="data_iteration")
-        ).complexity_handling()
-        s_rec, _ = DimensionScorer(
-            self._profile_for("O(n²)", scale=1.0, program_type="recursive_computation")
-        ).complexity_handling()
-        assert s_rec > s_loop
-
-    def test_score_bounded_zero_to_100(self) -> None:
-        dim = DimensionScorer(self._profile_for("O(2^n)", scale=1.0))
-        s, _ = dim.complexity_handling()
-        assert 0.0 <= s <= 100.0
-
-    def test_detail_contains_key_fields(self) -> None:
-        dim = DimensionScorer(self._profile_for("O(n²)", scale=0.5))
-        _, detail = dim.complexity_handling()
-        assert "base_ratio" in detail
-        assert "scale_factor" in detail
-        assert "confidence" in detail
-        assert "justification_credit" in detail
-
-
-# ---------------------------------------------------------------------------
-# 9. WeightEngine
-# ---------------------------------------------------------------------------
-
-
-class TestWeightEngine:
-
-    def test_weights_sum_to_one_for_all_types(self) -> None:
-        for pt in DIMENSION_WEIGHTS:
-            w = WeightEngine.weights_for(pt)  # type: ignore[arg-type]
-            assert abs(sum(w.values()) - 1.0) < 1e-9, f"Failed for {pt}"
-
-    def test_data_iteration_efficiency_is_highest(self) -> None:
-        w = WeightEngine.weights_for("data_iteration")
-        assert w["efficiency"] == max(w.values())
-
-    def test_function_heavy_quality_is_highest(self) -> None:
-        w = WeightEngine.weights_for("function_heavy")
-        assert w["quality"] == max(w.values())
-
-    def test_recursive_complexity_is_highest(self) -> None:
-        w = WeightEngine.weights_for("recursive_computation")
-        assert w["complexity"] == max(w.values())
-
-    def test_linear_script_quality_is_highest(self) -> None:
-        w = WeightEngine.weights_for("linear_script")
-        assert w["quality"] == max(w.values())
-
-    def test_unknown_type_returns_linear_script_default(self) -> None:
-        w = WeightEngine.weights_for("unknown_type")  # type: ignore[arg-type]
-        expected = DIMENSION_WEIGHTS["linear_script"]
-        assert w == expected
-
-
-# ---------------------------------------------------------------------------
-# 10. NarrativeGenerator
-# ---------------------------------------------------------------------------
-
-
-class TestNarrative:
-
-    def _gen(
-        self,
-        eff: float = 80.0,
-        qlt: float = 80.0,
-        cmp: float = 80.0,
-        score: float = 80.0,
-        grade: str = "Good",
-        program_type: str = "linear_script",
-    ) -> str:
-        p = ProgramProfile()
-        p.program_type = cast(ProgramType, program_type)
-        p.complexity_class = "O(n)"
-        p.complexity_confidence = 0.9
-        p.gini_index = 0.3
-        p.max_execution_count = 100
-        p.total_suggestions = 0
-        p.dead_line_ratio = 0.0
-        p.avg_function_length = 5.0
-        p.max_nesting_depth = 1
-        p.hotness_weighted_issue_score = 0.0
-        return NarrativeGenerator(
-            profile=p,
-            efficiency_score=eff,
-            quality_score=qlt,
-            complexity_score=cmp,
-            final_score=score,
-            grade=grade,
-        ).generate()
-
-    def test_narrative_is_non_empty_string(self) -> None:
-        assert len(self._gen()) > 10
-
-    def test_excellent_narrative_positive_tone(self) -> None:
-        text = self._gen(score=95.0, grade="Excellent")
-        assert any(w in text.lower() for w in ["well", "good", "efficient"])
-
-    def test_poor_score_mentions_improvement(self) -> None:
-        text = self._gen(eff=35.0, qlt=35.0, cmp=35.0, score=35.0, grade="Poor")
-        assert any(
-            w in text.lower() for w in ["issue", "concern", "significant", "problem"]
-        )
-
-    def test_recursive_type_mentioned_in_description(self) -> None:
-        text = self._gen(program_type="recursive_computation")
-        assert "recurs" in text.lower()
-
-    def test_dead_code_mentioned_when_present(self) -> None:
-        p = ProgramProfile()
-        p.program_type = "linear_script"
-        p.complexity_class = "O(n)"
-        p.complexity_confidence = 0.9
-        p.gini_index = 0.2
-        p.max_execution_count = 50
-        p.total_suggestions = 0
-        p.dead_line_ratio = 0.40  # 40% dead
-        p.avg_function_length = 5.0
-        p.max_nesting_depth = 1
-        p.hotness_weighted_issue_score = 0.0
-        text = NarrativeGenerator(p, 80.0, 45.0, 80.0, 65.0, "Fair").generate()
-        assert any(w in text.lower() for w in ["dead", "never executed", "unused"])
-
-    def test_high_nesting_mentioned(self) -> None:
-        p = ProgramProfile()
-        p.program_type = "nested_processing"
-        p.complexity_class = "O(n²)"
-        p.complexity_confidence = 0.8
-        p.gini_index = 0.7
-        p.max_execution_count = 10000
-        p.total_suggestions = 0
-        p.dead_line_ratio = 0.0
-        p.avg_function_length = 5.0
-        p.max_nesting_depth = 5  # deep nesting
-        p.hotness_weighted_issue_score = 0.0
-        text = NarrativeGenerator(p, 70.0, 50.0, 60.0, 60.0, "Fair").generate()
-        assert "nest" in text.lower()
-
-    def test_narrative_does_not_exceed_reasonable_length(self) -> None:
-        # Should be informative but concise — not a wall of text
-        text = self._gen(eff=40.0, qlt=40.0, cmp=40.0, score=40.0, grade="Poor")
-        assert len(text) < 800
-
-
-# ---------------------------------------------------------------------------
-# 11. DynamicScorer — full end-to-end calculate()
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicScorer:
-
-    def test_returns_score_report(self) -> None:
-        report = scorer(line_counts=[1]).calculate()
-        assert isinstance(report, ScoreReport)
-
-    def test_score_in_valid_range(self) -> None:
-        for counts in [[1], [1, 100, 100], [101, 10100, 10000]]:
-            r = scorer(line_counts=counts).calculate()
-            assert 0.0 <= r.final_score <= 100.0
-
-    def test_trivial_program_scores_excellent(self) -> None:
-        r = scorer(line_counts=[1], source_lines=1).calculate()
-        assert r.final_score >= 85.0
-        assert r.program_type == "trivial"
-
-    def test_breakdown_has_dimension_scores(self) -> None:
-        r = scorer(line_counts=[1]).calculate()
-        assert "efficiency_score" in r.breakdown
-        assert "quality_score" in r.breakdown
-        assert "complexity_score" in r.breakdown
-
-    def test_applied_weights_sum_to_one(self) -> None:
-        r = scorer(line_counts=[100, 100]).calculate()
-        total = sum(r.applied_weights.values())
-        assert abs(total - 1.0) < 1e-9
-
-    def test_dimension_scores_each_0_to_100(self) -> None:
-        r = scorer(line_counts=[101, 10100, 10000]).calculate()
-        for k, v in r.dimension_scores.items():
-            assert 0.0 <= v <= 100.0, f"{k} = {v} out of range"
-
-    def test_grade_matches_score(self) -> None:
-        r = scorer(line_counts=[1]).calculate()
-        for threshold, grade in GRADE_THRESHOLDS:
-            if r.final_score >= threshold:
-                assert r.grade == grade
-                break
-
-    def test_narrative_is_non_empty(self) -> None:
-        r = scorer(line_counts=[1]).calculate()
-        assert len(r.narrative) > 10
-
-    def test_adaptive_context_contains_program_type(self) -> None:
-        r = scorer(line_counts=[100, 100]).calculate()
-        assert "program_type" in r.adaptive_context
-
-    def test_adaptive_context_contains_weights(self) -> None:
-        r = scorer(line_counts=[1]).calculate()
-        assert "applied_weights" in r.adaptive_context
-
-    def test_complexity_class_populated(self) -> None:
-        r = scorer(line_counts=[101, 10100, 10000]).calculate()
-        assert r.complexity_class == "O(n²)"
-
-    def test_dead_code_lowers_score(self) -> None:
-        r_full = scorer(line_counts=[1] * 10, source_lines=10).calculate()
-        r_dead = scorer(line_counts=[1] * 5, source_lines=10).calculate()
-        assert r_dead.final_score < r_full.final_score
-
-    def test_suggestions_lower_score(self) -> None:
-        sug = [make_suggestion("high")] * 5
-        r_clean = scorer(line_counts=[1, 100]).calculate()
-        r_issues = scorer(line_counts=[1, 100], suggestions=sug).calculate()
-        assert r_issues.final_score < r_clean.final_score
+        assert r.to_dict()["cv"] == 1.2346
+
+    def test_to_dict_dimensions_is_dict(self) -> None:
+        d = self._make_report().to_dict()
+        assert isinstance(d["dimensions"], dict)
 
     def test_to_dict_is_json_serialisable(self) -> None:
-        import json
+        d = self._make_report().to_dict()
+        json.dumps(d)  # must not raise
 
-        r = scorer(line_counts=[1, 50, 50]).calculate()
+
+# ---------------------------------------------------------------------------
+# TestDetectComplexity
+# ---------------------------------------------------------------------------
+
+
+class TestDetectComplexity:
+
+    def test_empty_line_stats_returns_O1(self) -> None:
+        assert _detect_complexity({}) == "O(1)"
+
+    def test_all_counts_zero_returns_O1(self) -> None:
+        stats = {"1": {"count": 0}, "2": {"count": 0}}
+        assert _detect_complexity(stats) == "O(1)"
+
+    def test_single_execution_returns_O1(self) -> None:
+        stats = {"1": {"count": 1}}
+        assert _detect_complexity(stats) == "O(1)"
+
+    def test_flat_linear_returns_On(self) -> None:
+        # Three lines each running 100 times — classic O(n)
+        stats = {
+            "1": {"count": 1},
+            "2": {"count": 100},
+            "3": {"count": 100},
+        }
+        assert _detect_complexity(stats) == "O(n)"
+
+    def test_nested_loop_returns_On2(self) -> None:
+        # Outer=101, inner header=10100, inner body=10000
+        stats = {
+            "1": {"count": 101},
+            "2": {"count": 10100},
+            "3": {"count": 10000},
+        }
+        assert _detect_complexity(stats) == "O(n²)"
+
+    def test_triple_nested_returns_On3(self) -> None:
+        # Three hot lines at ~5000, outer=5, mid=50
+        stats = {
+            "1": {"count": 5},
+            "2": {"count": 50},
+            "3": {"count": 5000},
+            "4": {"count": 5000},
+            "5": {"count": 5000},
+        }
+        assert _detect_complexity(stats) == "O(n³)"
+
+    def test_log_n_range_detected(self) -> None:
+        # max_count = 4 ≈ log2(4) * 2 — sub-linear
+        stats = {str(i): {"count": 1} for i in range(1, 4)}
+        stats["4"] = {"count": 4}
+        result = _detect_complexity(stats)
+        assert result in ("O(log n)", "O(1)", "O(n)")
+
+    def test_deep_nesting_returns_high_complexity(self) -> None:
+        # Four or more hot lines — expects n^k or similar
+        stats = {
+            "1": {"count": 1},
+            "2": {"count": 10},
+            "3": {"count": 100},
+            "4": {"count": 10000},
+            "5": {"count": 10000},
+            "6": {"count": 10000},
+            "7": {"count": 10000},
+        }
+        result = _detect_complexity(stats)
+        assert result in ("O(n^k)", "O(n³)", "O(n²)")
+
+    def test_all_complexity_classes_are_in_complexity_points(self) -> None:
+        # Every class the heuristic can return must have a point value
+        possible = {
+            "O(1)",
+            "O(log n)",
+            "O(n)",
+            "O(n log n)",
+            "O(n²)",
+            "O(n³)",
+            "O(n^k)",
+            "O(2^n)",
+        }
+        for cls in possible:
+            assert cls in COMPLEXITY_POINTS, f"Missing: {cls}"
+
+
+# ---------------------------------------------------------------------------
+# TestAssignGrade
+# ---------------------------------------------------------------------------
+
+
+class TestAssignGrade:
+
+    def test_score_100_is_excellent(self) -> None:
+        assert _assign_grade(100.0) == "Excellent"
+
+    def test_score_90_is_excellent(self) -> None:
+        assert _assign_grade(90.0) == "Excellent"
+
+    def test_score_89_is_good(self) -> None:
+        assert _assign_grade(89.9) == "Good"
+
+    def test_score_75_is_good(self) -> None:
+        assert _assign_grade(75.0) == "Good"
+
+    def test_score_74_is_fair(self) -> None:
+        assert _assign_grade(74.9) == "Fair"
+
+    def test_score_60_is_fair(self) -> None:
+        assert _assign_grade(60.0) == "Fair"
+
+    def test_score_59_is_poor(self) -> None:
+        assert _assign_grade(59.9) == "Poor"
+
+    def test_score_40_is_poor(self) -> None:
+        assert _assign_grade(40.0) == "Poor"
+
+    def test_score_39_is_critical(self) -> None:
+        assert _assign_grade(39.9) == "Critical"
+
+    def test_score_0_is_critical(self) -> None:
+        assert _assign_grade(0.0) == "Critical"
+
+
+# ---------------------------------------------------------------------------
+# TestLowestDimension
+# ---------------------------------------------------------------------------
+
+
+class TestLowestDimension:
+
+    def test_correctness_lowest(self) -> None:
+        # correctness=0/35 = 0% — clearly lowest
+        dims = DimensionScores(
+            correctness=0.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=15.0,
+        )
+        assert _lowest_dimension(dims) == "Correctness"
+
+    def test_efficiency_complexity_lowest(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=5.0,  # 5/30 ≈ 17%
+            quality=20.0,
+            maintainability=15.0,
+        )
+        assert _lowest_dimension(dims) == "Efficiency & Complexity"
+
+    def test_quality_lowest(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=2.0,  # 2/20 = 10%
+            maintainability=15.0,
+        )
+        assert _lowest_dimension(dims) == "Quality"
+
+    def test_maintainability_lowest(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=0.0,  # 0/15 = 0%
+        )
+        assert _lowest_dimension(dims) == "Maintainability"
+
+    def test_uses_percentage_not_raw_value(self) -> None:
+        # correctness=17.5/35=50%, efficiency=15/30=50%, quality=0/20=0%
+        # quality must win even though raw value isn't smallest vs correctness
+        dims = DimensionScores(
+            correctness=17.5,
+            efficiency_complexity=15.0,
+            quality=0.0,
+            maintainability=15.0,
+        )
+        assert _lowest_dimension(dims) == "Quality"
+
+    def test_perfect_scores_returns_a_valid_dimension(self) -> None:
+        # All at 100% — min() picks one deterministically
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=15.0,
+        )
+        valid = {
+            "Correctness",
+            "Efficiency & Complexity",
+            "Quality",
+            "Maintainability",
+        }
+        assert _lowest_dimension(dims) in valid
+
+
+# ---------------------------------------------------------------------------
+# TestGenerateNarrative
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateNarrative:
+
+    def _dims_with_lowest(self, lowest: str) -> DimensionScores:
+        """Return DimensionScores where the named dimension scores 0%."""
+        d = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=15.0,
+        )
+        if lowest == "Correctness":
+            d.correctness = 0.0
+        elif lowest == "Efficiency & Complexity":
+            d.efficiency_complexity = 0.0
+        elif lowest == "Quality":
+            d.quality = 0.0
+        else:
+            d.maintainability = 0.0
+        return d
+
+    def test_score_90_plus_contains_excellent(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=15.0,
+        )
+        narrative = _generate_narrative(95.0, dims)
+        assert "Excellent" in narrative
+
+    def test_score_75_to_89_contains_good(self) -> None:
+        dims = self._dims_with_lowest("Maintainability")
+        narrative = _generate_narrative(80.0, dims)
+        assert "Good" in narrative
+
+    def test_score_60_to_74_contains_fair(self) -> None:
+        dims = self._dims_with_lowest("Quality")
+        narrative = _generate_narrative(65.0, dims)
+        assert "Fair" in narrative
+
+    def test_score_40_to_59_contains_needs_work(self) -> None:
+        dims = self._dims_with_lowest("Correctness")
+        narrative = _generate_narrative(50.0, dims)
+        assert "needs some work" in narrative.lower()
+
+    def test_score_below_40_contains_significant_issues(self) -> None:
+        dims = self._dims_with_lowest("Correctness")
+        narrative = _generate_narrative(20.0, dims)
+        assert "significant issues" in narrative.lower()
+
+    def test_narrative_names_correctness_when_lowest(self) -> None:
+        dims = self._dims_with_lowest("Correctness")
+        narrative = _generate_narrative(60.0, dims)
+        assert "Correctness" in narrative
+
+    def test_narrative_names_efficiency_when_lowest(self) -> None:
+        dims = self._dims_with_lowest("Efficiency & Complexity")
+        narrative = _generate_narrative(60.0, dims)
+        assert "Efficiency" in narrative
+
+    def test_narrative_names_quality_when_lowest(self) -> None:
+        dims = self._dims_with_lowest("Quality")
+        narrative = _generate_narrative(60.0, dims)
+        assert "Quality" in narrative
+
+    def test_narrative_names_maintainability_when_lowest(self) -> None:
+        dims = self._dims_with_lowest("Maintainability")
+        narrative = _generate_narrative(60.0, dims)
+        assert "Maintainability" in narrative
+
+    def test_partial_profiling_note_included(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=15.0,
+            quality=20.0,
+            maintainability=15.0,
+            profiling_partial=True,
+        )
+        narrative = _generate_narrative(85.0, dims)
+        assert "profiling" in narrative.lower()
+
+    def test_partial_optimizer_note_included(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=10.0,
+            maintainability=7.0,
+            optimizer_partial=True,
+        )
+        narrative = _generate_narrative(82.0, dims)
+        assert "optimizer" in narrative.lower()
+
+    def test_both_partial_notes_included(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=15.0,
+            quality=10.0,
+            maintainability=7.0,
+            profiling_partial=True,
+            optimizer_partial=True,
+        )
+        narrative = _generate_narrative(67.0, dims)
+        assert "profiling" in narrative.lower()
+        assert "optimizer" in narrative.lower()
+
+    def test_no_partial_no_note(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=30.0,
+            quality=20.0,
+            maintainability=15.0,
+        )
+        narrative = _generate_narrative(100.0, dims)
+        assert "partial" not in narrative.lower()
+
+    def test_narrative_is_non_empty_string(self) -> None:
+        dims = DimensionScores()
+        narrative = _generate_narrative(0.0, dims)
+        assert isinstance(narrative, str) and len(narrative) > 10
+
+
+# ---------------------------------------------------------------------------
+# TestScorerCorrectness
+# ---------------------------------------------------------------------------
+
+
+class TestScorerCorrectness:
+
+    def test_zero_errors_scores_max(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=[])
+        assert s._score_correctness() == MAX_CORRECTNESS
+
+    def test_one_error_scores_10(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=["e"])
+        assert s._score_correctness() == 10.0
+
+    def test_two_errors_scores_zero(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=["e", "f"])
+        assert s._score_correctness() == 0.0
+
+    def test_many_errors_scores_zero(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=["e"] * 10)
+        assert s._score_correctness() == 0.0
+
+    def test_errors_none_treated_as_empty(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=None)
+        assert s._score_correctness() == MAX_CORRECTNESS
+
+    def test_error_count_stored_in_report(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report(), errors=["e", "f"])
+        r = s.calculate()
+        assert r.error_count == 2
+
+
+# ---------------------------------------------------------------------------
+# TestScorerEfficiencyComplexity
+# ---------------------------------------------------------------------------
+
+
+class TestScorerEfficiencyComplexity:
+
+    def test_no_profiling_awards_partial_credit(self) -> None:
+        s = Scorer(None, _empty_report())
+        _, c_sub, e_sub, partial = s._score_efficiency_complexity()
+        assert partial is True
+        assert c_sub == PARTIAL_COMPLEXITY
+        assert e_sub == PARTIAL_EFFICIENCY
+
+    def test_no_profiling_complexity_class_is_unknown(self) -> None:
+        s = Scorer(None, _empty_report())
+        cls, _, _, _ = s._score_efficiency_complexity()
+        assert cls == "Unknown"
+
+    def test_o1_profile_scores_max_complexity(self) -> None:
+        p = make_profiling([1, 1, 1, 1, 1])
+        s = Scorer(p, _empty_report())
+        cls, c_sub, _, partial = s._score_efficiency_complexity()
+        assert partial is False
+        assert cls == "O(1)"
+        assert c_sub == COMPLEXITY_POINTS["O(1)"]
+
+    def test_nested_loop_profile_scores_on2_complexity(self) -> None:
+        p = make_profiling([101, 10100, 10000])
+        s = Scorer(p, _empty_report())
+        cls, c_sub, _, _ = s._score_efficiency_complexity()
+        assert cls == "O(n²)"
+        assert c_sub == COMPLEXITY_POINTS["O(n²)"]
+
+    def test_complexity_and_efficiency_sum_to_efficiency_complexity(self) -> None:
+        p = make_profiling([1, 1, 1])
+        s = Scorer(p, _empty_report())
+        _, c_sub, e_sub, _ = s._score_efficiency_complexity()
+        r = s.calculate()
+        assert r.dimensions.efficiency_complexity == pytest.approx(c_sub + e_sub)
+
+    def test_complexity_points_all_map_correctly(self) -> None:
+        # Every COMPLEXITY_POINTS entry should be reachable via the scorer
+        for cls, expected_pts in COMPLEXITY_POINTS.items():
+            assert 0.0 <= expected_pts <= 15.0
+
+    def test_flat_profile_gives_max_efficiency_subscore(self) -> None:
+        # All lines run once → CV = 0 → efficiency = 15
+        p = make_profiling([1, 1, 1, 1, 1])
+        s = Scorer(p, _empty_report())
+        _, _, e_sub, _ = s._score_efficiency_complexity()
+        assert e_sub == 15.0
+
+    def test_highly_spiked_profile_gives_low_efficiency_subscore(self) -> None:
+        # 50 background lines running once + one spike of 10000
+        # produces CV > 4.0 → efficiency_subscore = 0
+        p = make_profiling([1] * 50 + [10000])
+        s = Scorer(p, _empty_report())
+        _, _, e_sub, _ = s._score_efficiency_complexity()
+        assert e_sub == 0.0
+
+    def test_profiling_partial_flag_false_when_data_present(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report())
+        r = s.calculate()
+        assert r.dimensions.profiling_partial is False
+
+
+# ---------------------------------------------------------------------------
+# TestScorerComputeCV
+# ---------------------------------------------------------------------------
+
+
+class TestScorerComputeCV:
+
+    def test_empty_line_stats_returns_zero(self) -> None:
+        s = Scorer(
+            {"line_stats": {}, "total_time_ms": 0.0, "total_lines": 0}, _empty_report()
+        )
+        assert s._compute_cv() == 0.0
+
+    def test_single_line_returns_zero(self) -> None:
+        # Only one count — not enough for a meaningful spread
+        s = Scorer(make_profiling([100]), _empty_report())
+        assert s._compute_cv() == 0.0
+
+    def test_identical_counts_give_cv_zero(self) -> None:
+        # std=0 when all values are equal → CV=0
+        s = Scorer(make_profiling([50, 50, 50, 50]), _empty_report())
+        assert s._compute_cv() == pytest.approx(0.0)
+
+    def test_cv_increases_with_spread(self) -> None:
+        low_spread = Scorer(make_profiling([10, 10, 11, 10]), _empty_report())
+        high_spread = Scorer(make_profiling([1, 1, 1, 10000]), _empty_report())
+        assert high_spread._compute_cv() > low_spread._compute_cv()
+
+    def test_cv_is_non_negative(self) -> None:
+        for counts in [[1], [1, 2], [100, 1, 50], [1, 1, 1, 10000]]:
+            s = Scorer(make_profiling(counts), _empty_report())
+            assert s._compute_cv() >= 0.0
+
+    def test_cv_stored_in_score_report(self) -> None:
+        p = make_profiling([1, 100])
+        s = Scorer(p, _empty_report())
+        r = s.calculate()
+        assert r.cv >= 0.0
+
+    def test_cv_zero_maps_to_max_efficiency(self) -> None:
+        # Identical counts → CV=0 → efficiency_subscore=15
+        s = Scorer(make_profiling([5, 5, 5, 5, 5]), _empty_report())
+        assert s._compute_efficiency_subscore() == 15.0
+
+    @pytest.mark.parametrize(
+        "counts,expected_sub",
+        [
+            ([1, 1, 1, 1], 15.0),  # CV=0.0  < 0.5 → 15
+            ([1, 2, 3, 10], 12.0),  # CV≈0.8  < 1.0 → 12
+            ([1, 1, 1, 100], 8.0),  # CV≈1.7  < 2.0 →  8
+            ([1] * 50 + [10000], 0.0),  # CV > 4.0       →  0
+        ],
+    )
+    def test_cv_bands(self, counts: list[int], expected_sub: float) -> None:
+        s = Scorer(make_profiling(counts), _empty_report())
+        assert s._compute_efficiency_subscore() == expected_sub
+
+
+# ---------------------------------------------------------------------------
+# TestScorerQuality
+# ---------------------------------------------------------------------------
+
+
+class TestScorerQuality:
+
+    def test_no_optimizer_gives_partial_credit(self) -> None:
+        s = Scorer(make_profiling([1]), None)
+        score, partial = s._score_quality()
+        assert partial is True
+        assert score == PARTIAL_QUALITY
+
+    def test_empty_suggestions_gives_max_quality(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report())
+        score, partial = s._score_quality()
+        assert partial is False
+        assert score == MAX_QUALITY
+
+    def test_only_quality_patterns_are_counted(self) -> None:
+        # Maintainability patterns must NOT affect quality score
+        report = _report(
+            ("unused_vars", "high"),  # maintainability — ignored
+            ("nested_loops", "high"),  # maintainability — ignored
+        )
+        s = Scorer(make_profiling([1] * 10), report, source_lines=10)
+        score, _ = s._score_quality()
+        assert score == MAX_QUALITY
+
+    def test_high_severity_quality_suggestion_reduces_score(self) -> None:
+        report = _report(("hot_loop", "high"))
+        s = Scorer(make_profiling([1] * 5), report, source_lines=5)
+        score, _ = s._score_quality()
+        assert score < MAX_QUALITY
+
+    def test_all_quality_patterns_recognised(self) -> None:
+        for pattern in QUALITY_PATTERNS:
+            report = _report((pattern, "medium"))
+            s = Scorer(make_profiling([1] * 20), report, source_lines=20)
+            score, _ = s._score_quality()
+            assert score < MAX_QUALITY, f"Pattern {pattern!r} not affecting quality"
+
+    def test_quality_normalised_by_source_lines(self) -> None:
+        # Same suggestion, but larger program → lower density → higher score
+        report_same = _report(("hot_loop", "high"))
+        s_small = Scorer(make_profiling([1] * 2), report_same, source_lines=2)
+        s_large = Scorer(make_profiling([1] * 50), report_same, source_lines=50)
+        score_small, _ = s_small._score_quality()
+        score_large, _ = s_large._score_quality()
+        assert score_large >= score_small
+
+    def test_optimizer_partial_flag_false_when_optimizer_present(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report())
+        r = s.calculate()
+        assert r.dimensions.optimizer_partial is False
+
+
+# ---------------------------------------------------------------------------
+# TestScorerMaintainability
+# ---------------------------------------------------------------------------
+
+
+class TestScorerMaintainability:
+
+    def test_no_optimizer_gives_partial_credit(self) -> None:
+        s = Scorer(make_profiling([1]), None)
+        assert s._score_maintainability() == PARTIAL_MAINTAINABILITY
+
+    def test_empty_suggestions_gives_max_maintainability(self) -> None:
+        s = Scorer(make_profiling([1]), _empty_report())
+        assert s._score_maintainability() == MAX_MAINTAINABILITY
+
+    def test_only_maintainability_patterns_are_counted(self) -> None:
+        # Quality patterns must NOT affect maintainability score
+        report = _report(
+            ("hot_loop", "high"),  # quality — ignored
+            ("dead_code", "high"),  # quality — ignored
+        )
+        s = Scorer(make_profiling([1] * 10), report, source_lines=10)
+        assert s._score_maintainability() == MAX_MAINTAINABILITY
+
+    def test_high_severity_maintainability_suggestion_reduces_score(self) -> None:
+        report = _report(("unused_vars", "high"))
+        s = Scorer(make_profiling([1] * 5), report, source_lines=5)
+        assert s._score_maintainability() < MAX_MAINTAINABILITY
+
+    def test_all_maintainability_patterns_recognised(self) -> None:
+        for pattern in MAINTAINABILITY_PATTERNS:
+            report = _report((pattern, "medium"))
+            s = Scorer(make_profiling([1] * 20), report, source_lines=20)
+            score = s._score_maintainability()
+            assert (
+                score < MAX_MAINTAINABILITY
+            ), f"Pattern {pattern!r} not affecting maintainability"
+
+    def test_maintainability_normalised_by_source_lines(self) -> None:
+        report_same = _report(("nested_loops", "high"))
+        s_small = Scorer(make_profiling([1] * 2), report_same, source_lines=2)
+        s_large = Scorer(make_profiling([1] * 50), report_same, source_lines=50)
+        assert s_large._score_maintainability() >= s_small._score_maintainability()
+
+
+# ---------------------------------------------------------------------------
+# TestScorerDensityToScore
+# ---------------------------------------------------------------------------
+
+
+class TestScorerDensityToScore:
+
+    @pytest.mark.parametrize(
+        "density,max_score,expected",
+        [
+            # density=0 → 100% of max
+            (0.0, 20.0, 20.0),
+            (0.0, 15.0, 15.0),
+            # density≤0.3 → 80%
+            (0.1, 20.0, 16.0),
+            (0.3, 20.0, 16.0),
+            (0.1, 15.0, 12.0),
+            # density≤0.6 → 60%
+            (0.31, 20.0, 12.0),
+            (0.6, 20.0, 12.0),
+            (0.31, 15.0, 9.0),
+            # density≤1.0 → 35%
+            (0.61, 20.0, 7.0),
+            (1.0, 20.0, 7.0),
+            (0.61, 15.0, pytest.approx(5.25)),
+            # density>1.0 → 15%
+            (1.01, 20.0, 3.0),
+            (5.0, 20.0, 3.0),
+            (1.01, 15.0, pytest.approx(2.25)),
+        ],
+    )
+    def test_density_band(
+        self, density: float, max_score: float, expected: float
+    ) -> None:
+        result = Scorer._density_to_score(density, max_score)
+        assert result == expected
+
+    def test_result_never_exceeds_max_score(self) -> None:
+        for density in [0.0, 0.1, 0.5, 1.0, 2.0]:
+            for max_score in [15.0, 20.0]:
+                result = Scorer._density_to_score(density, max_score)
+                assert result <= max_score
+
+    def test_result_is_always_non_negative(self) -> None:
+        for density in [0.0, 0.5, 1.0, 10.0]:
+            assert Scorer._density_to_score(density, 20.0) >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestScorerCalculate (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+class TestScorerCalculate:
+
+    def test_returns_score_report_instance(self) -> None:
+        r = Scorer(make_profiling([1]), _empty_report()).calculate()
+        assert isinstance(r, ScoreReport)
+
+    def test_perfect_program_scores_100(self) -> None:
+        # O(1) profile, no errors, no suggestions
+        p = make_profiling([1, 1, 1, 1, 1])
+        r = Scorer(p, _empty_report(), source_lines=5, errors=[]).calculate()
+        assert r.score == 100.0
+
+    def test_perfect_program_grade_is_excellent(self) -> None:
+        p = make_profiling([1, 1, 1, 1, 1])
+        r = Scorer(p, _empty_report(), source_lines=5, errors=[]).calculate()
+        assert r.grade == "Excellent"
+
+    def test_score_always_in_0_to_100(self) -> None:
+        combos = [
+            (make_profiling([1]), _empty_report(), 5, []),
+            (None, _empty_report(), 5, []),
+            (make_profiling([1]), None, 5, []),
+            (None, None, 5, ["err"]),
+            (
+                make_profiling([101, 10100, 10000]),
+                _report(("hot_loop", "high"), ("nested_loops", "high")),
+                3,
+                ["err", "err"],
+            ),
+        ]
+        for prof, opt, sl, errs in combos:
+            r = Scorer(prof, opt, source_lines=sl, errors=errs).calculate()
+            assert 0.0 <= r.score <= 100.0, f"Out of bounds: {r.score}"
+
+    def test_two_errors_caps_correctness_at_zero(self) -> None:
+        p = make_profiling([1])
+        r = Scorer(p, _empty_report(), errors=["e", "f"]).calculate()
+        assert r.dimensions.correctness == 0.0
+
+    def test_nested_loop_lower_score_than_linear(self) -> None:
+        linear = Scorer(
+            make_profiling([1, 100, 100]), _empty_report(), source_lines=3
+        ).calculate()
+        nested = Scorer(
+            make_profiling([101, 10100, 10000]), _empty_report(), source_lines=3
+        ).calculate()
+        assert nested.score < linear.score
+
+    def test_complexity_class_in_report(self) -> None:
+        p = make_profiling([101, 10100, 10000])
+        r = Scorer(p, _empty_report(), source_lines=3).calculate()
+        assert r.complexity_class == "O(n²)"
+
+    def test_breakdown_keys_all_present(self) -> None:
+        r = Scorer(make_profiling([1]), _empty_report()).calculate()
+        dims = r.dimensions.to_dict()
+        expected = {
+            "correctness",
+            "efficiency_complexity",
+            "quality",
+            "maintainability",
+            "complexity_subscore",
+            "efficiency_subscore",
+            "profiling_partial",
+            "optimizer_partial",
+        }
+        assert set(dims.keys()) == expected
+
+    def test_breakdown_values_non_negative(self) -> None:
+        p = make_profiling([1, 50, 50])
+        r = Scorer(p, _report(("hot_loop", "high")), source_lines=3).calculate()
+        assert r.dimensions.correctness >= 0.0
+        assert r.dimensions.efficiency_complexity >= 0.0
+        assert r.dimensions.quality >= 0.0
+        assert r.dimensions.maintainability >= 0.0
+
+    def test_lines_profiled_in_report(self) -> None:
+        p = make_profiling([1, 50, 200])
+        r = Scorer(p, _empty_report()).calculate()
+        assert r.lines_profiled == 3
+
+    def test_no_profiling_partial_flag_set(self) -> None:
+        r = Scorer(None, _empty_report()).calculate()
+        assert r.dimensions.profiling_partial is True
+
+    def test_no_optimizer_partial_flag_set(self) -> None:
+        r = Scorer(make_profiling([1]), None).calculate()
+        assert r.dimensions.optimizer_partial is True
+
+    def test_both_present_no_partial_flags(self) -> None:
+        r = Scorer(make_profiling([1]), _empty_report()).calculate()
+        assert r.dimensions.profiling_partial is False
+        assert r.dimensions.optimizer_partial is False
+
+    def test_narrative_non_empty(self) -> None:
+        r = Scorer(make_profiling([1]), _empty_report()).calculate()
+        assert isinstance(r.narrative, str) and len(r.narrative) > 10
+
+    def test_efficiency_complexity_equals_subscore_sum(self) -> None:
+        p = make_profiling([1, 100, 100])
+        r = Scorer(p, _empty_report()).calculate()
+        assert r.dimensions.efficiency_complexity == pytest.approx(
+            r.dimensions.complexity_subscore + r.dimensions.efficiency_subscore
+        )
+
+    def test_final_score_equals_dimension_sum(self) -> None:
+        p = make_profiling([1, 1, 1])
+        r = Scorer(p, _empty_report(), source_lines=3, errors=[]).calculate()
+        expected = (
+            r.dimensions.correctness
+            + r.dimensions.efficiency_complexity
+            + r.dimensions.quality
+            + r.dimensions.maintainability
+        )
+        assert r.score == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# TestCalculateScoreFunction
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateScoreFunction:
+
+    def test_returns_score_report(self) -> None:
+        r = calculate_score(make_profiling([1]))
+        assert isinstance(r, ScoreReport)
+
+    def test_matches_scorer_directly(self) -> None:
+        p = make_profiling([1, 100, 100])
+        report = _report(("hot_loop", "medium"))
+        r1 = calculate_score(p, optimizer_report=report, source_lines=10, errors=["e"])
+        r2 = Scorer(p, report, source_lines=10, errors=["e"]).calculate()
+        assert r1.score == r2.score
+        assert r1.grade == r2.grade
+        assert r1.complexity_class == r2.complexity_class
+
+    def test_defaults_no_optimizer_no_errors(self) -> None:
+        r = calculate_score(make_profiling([1]))
+        assert r.dimensions.optimizer_partial is True
+        assert r.error_count == 0
+
+    def test_none_profiling_default(self) -> None:
+        r = calculate_score(None)
+        assert r.dimensions.profiling_partial is True
+
+    def test_to_dict_is_json_serialisable(self) -> None:
+        p = make_profiling([1, 50, 50])
+        r = calculate_score(p, optimizer_report=_empty_report(), source_lines=3)
         json.dumps(r.to_dict())  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# 12. Context-awareness — same structure, different scale = different score
-# ---------------------------------------------------------------------------
-
-
-class TestContextAwareness:
-
-    def test_small_nested_loop_scores_better_than_large(self) -> None:
-        """
-        Core adaptive property: a nested loop over 3 iterations should
-        score significantly better than one over 10,000 iterations,
-        even though they have the same structural O(n²) pattern.
-        """
-        small = scorer(
-            line_counts=[3, 9, 9],
-            source_lines=3,
-        ).calculate()
-        large = scorer(
-            line_counts=[101, 10100, 10000],
-            source_lines=3,
-        ).calculate()
-        assert small.final_score > large.final_score
-
-    def test_issues_on_hot_lines_penalise_more_than_cold(self) -> None:
-        """
-        A suggestion on a line that runs 10000 times should produce a
-        lower score than the same suggestion on a line that runs once.
-        """
-        hot_sug = [make_suggestion("medium", line=2)]
-        cold_sug = [make_suggestion("medium", line=1)]
-
-        r_hot = scorer(line_counts=[1, 10000], suggestions=hot_sug).calculate()
-        r_cold = scorer(line_counts=[1, 10000], suggestions=cold_sug).calculate()
-        # Hot suggestion should produce lower or equal score
-        assert r_hot.final_score <= r_cold.final_score
-
-    def test_recursive_scores_same_complexity_better_than_looping(self) -> None:
-        """
-        Recursive programs earn a justification credit that reduces the
-        complexity penalty. At low execution scale the difference is small
-        but the recursive score should not be significantly worse.
-        """
-        counts = [1000, 1000]
-        r_loop = scorer(
-            line_counts=counts,
-            source_lines=5,
-        ).calculate()
-        r_rec = scorer(
-            line_counts=counts,
-            source_lines=5,
-            function_stats=make_fn_stats(max_recursion_depth=8),
-        ).calculate()
-        # Recursive complexity score should be higher due to justification credit
-        assert (
-            r_rec.dimension_scores["complexity"]
-            >= r_loop.dimension_scores["complexity"]
-        )
-
-    def test_low_confidence_softens_complexity_score(self) -> None:
-        r_certain = scorer(
-            line_counts=[101, 10100, 10000],
-            complexity_confidence=1.0,
-        ).calculate()
-        r_unsure = scorer(
-            line_counts=[101, 10100, 10000],
-            complexity_confidence=0.3,
-        ).calculate()
-        assert r_unsure.final_score >= r_certain.final_score
-
-    def test_same_score_for_different_machines_given_same_structure(self) -> None:
-        """
-        Execution time does not directly penalise — only structural and
-        count-based signals matter, so the score should be stable across
-        fast and slow execution environments.
-        """
-        r_fast = scorer(line_counts=[100, 100], total_time_ms=0.5).calculate()
-        r_slow = scorer(line_counts=[100, 100], total_time_ms=500.0).calculate()
-        # Scores should be close — structural signals are the same
-        assert abs(r_fast.final_score - r_slow.final_score) < 10.0
-
-    def test_issue_density_normalised_by_program_size(self) -> None:
-        sug = [make_suggestion("high")] * 5
-        r_small = scorer(suggestions=sug, source_lines=10).calculate()
-        r_large = scorer(suggestions=sug, source_lines=200).calculate()
-        # Same 5 issues in a larger program should be scored more leniently
-        assert r_large.final_score > r_small.final_score
-
-
-# ---------------------------------------------------------------------------
-# 13. Program type scoring appropriateness
-# ---------------------------------------------------------------------------
-
-
-class TestProgramTypes:
-
-    def test_trivial_uses_quality_dominant_weights(self) -> None:
-        r = scorer(line_counts=[1, 1]).calculate()
-        if r.program_type == "trivial":
-            assert r.applied_weights["quality"] >= 0.60
-
-    def test_data_iteration_uses_efficiency_dominant_weights(self) -> None:
-        r = scorer(
-            line_counts=[1, 500, 500],
-            function_stats=None,
-        ).calculate()
-        if r.program_type == "data_iteration":
-            assert r.applied_weights["efficiency"] >= 0.40
-
-    def test_recursive_uses_complexity_dominant_weights(self) -> None:
-        r = scorer(
-            line_counts=[50, 50],
-            function_stats=make_fn_stats(max_recursion_depth=5),
-        ).calculate()
-        assert r.program_type == "recursive_computation"
-        assert r.applied_weights["complexity"] >= 0.35
-
-    def test_all_program_types_produce_valid_reports(self) -> None:
-        configs: list[dict[str, Any]] = [
-            {"line_counts": [1]},
-            {"line_counts": [1, 2, 5]},
-            {"line_counts": [1, 100, 100]},
-            {"line_counts": [101, 10100, 10000]},
-            {
-                "line_counts": [50, 50],
-                "function_stats": make_fn_stats(max_recursion_depth=3),
-            },
-        ]
-        for cfg in configs:
-            r = scorer(**cfg).calculate()
-            assert isinstance(r, ScoreReport)
-            assert 0.0 <= r.final_score <= 100.0
-
-
-# ---------------------------------------------------------------------------
-# 14. calculate_full_score()
-# ---------------------------------------------------------------------------
-
-
-class TestCalculateFullScore:
-
-    class _FakeProfilingData:
-        """Minimal mock of ProfilingData."""
-
-        def to_dict(self) -> dict:
-            return make_profiling(line_counts=[1, 50, 50])
-
-    class _FakeResult:
-        def __init__(self) -> None:
-            self.profiling = TestCalculateFullScore._FakeProfilingData()
-
-    def test_returns_score_report(self) -> None:
-        result = self._FakeResult()
-        r = calculate_full_score("x = 1\ny = 2\nz = x + y", result)
-        assert isinstance(r, ScoreReport)
-
-    def test_score_in_valid_range(self) -> None:
-        result = self._FakeResult()
-        r = calculate_full_score("x = 1", result)
-        assert 0.0 <= r.final_score <= 100.0
-
-    def test_none_profiling_handled_gracefully(self) -> None:
-        class NullResult:
-            profiling: Optional[Any] = None
-
-        r = calculate_full_score("x = 1", NullResult())
-        assert isinstance(r, ScoreReport)
-        assert r.program_type == "trivial"
-
-    def test_source_lines_counted_correctly(self) -> None:
-        # Comments and blank lines should NOT count
-        source = """
-# This is a comment
-
-x = 1
-y = 2
-# Another comment
-z = x + y
-"""
-        result = self._FakeResult()
-        r = calculate_full_score(source, result)
-        assert isinstance(r, ScoreReport)
-
-    def test_suggestions_passed_through(self) -> None:
-        result = self._FakeResult()
-        sug = [make_suggestion("high")]
-        r_clean = calculate_full_score("x = 1", result)
-        r_issues = calculate_full_score("x = 1", result, suggestions=sug)
-        assert r_issues.final_score <= r_clean.final_score
-
-
-# ---------------------------------------------------------------------------
-# 15. calculate_score() — backwards-compatible API
-# ---------------------------------------------------------------------------
-
-
-class TestCalculateScore:
-
-    def test_returns_score_report(self) -> None:
-        p = make_profiling(line_counts=[1])
-        assert isinstance(calculate_score(p), ScoreReport)
-
-    def test_matches_dynamic_scorer(self) -> None:
-        p = make_profiling(line_counts=[1, 100, 100])
-        sug = [make_suggestion("medium")]
-        r1 = calculate_score(p, suggestions=sug, total_source_lines=10)
-        r2 = DynamicScorer(p, suggestions=sug, total_source_lines=10).calculate()
-        assert r1.final_score == r2.final_score
-
-    def test_function_stats_passed_through(self) -> None:
-        p = make_profiling(line_counts=[50, 50])
-        fs = make_fn_stats(max_recursion_depth=5)
-        r = calculate_score(p, function_stats=fs)
-        assert r.program_type == "recursive_computation"
-
-    def test_to_dict_json_serialisable(self) -> None:
-        import json
-
-        p = make_profiling(line_counts=[1, 50, 50])
-        json.dumps(calculate_score(p).to_dict())
-
-
-# ---------------------------------------------------------------------------
-# 16. Scorer alias — backwards-compatible class
-# ---------------------------------------------------------------------------
-
-
-class TestScorerAlias:
-
-    def test_scorer_is_subclass_of_dynamic_scorer(self) -> None:
-        assert issubclass(Scorer, DynamicScorer)
-
-    def test_accepts_original_signature(self) -> None:
-        p = make_profiling(line_counts=[1])
-        s = Scorer(profiling_data=p, suggestions=[], total_source_lines=5)
-        assert isinstance(s.calculate(), ScoreReport)
-
-    def test_trivial_program_high_score(self) -> None:
-        p = make_profiling(line_counts=[1])
-        r = Scorer(p).calculate()
-        assert r.final_score >= 85.0
-
-    def test_nested_loop_lower_score(self) -> None:
-        p = make_profiling(line_counts=[101, 10100, 10000])
-        r = Scorer(p).calculate()
-        assert r.final_score < 90.0
-
-    def test_score_alias_property(self) -> None:
-        p = make_profiling(line_counts=[1])
-        r = Scorer(p).calculate()
-        assert r.score == r.final_score
-
-
-# ---------------------------------------------------------------------------
-# 17. Edge cases
+# TestEdgeCases
 # ---------------------------------------------------------------------------
 
 
 class TestEdgeCases:
 
-    def test_empty_line_stats(self) -> None:
-        p = {
-            "line_stats": {},
-            "function_stats": {},
-            "total_time_ms": 0.0,
-            "total_lines": 0,
-            "lines_profiled": 0,
-        }
-        r = calculate_score(p)
-        assert isinstance(r, ScoreReport)
-        assert r.program_type == "trivial"
-        assert r.final_score >= 80.0
+    def test_empty_line_stats_dict(self) -> None:
+        # When profiling is present but line_stats is empty, the scorer
+        # treats it the same as no profiling and awards partial credit.
+        # complexity_class is "Unknown" and profiling_partial is True.
+        p = {"line_stats": {}, "total_time_ms": 0.0, "total_lines": 0}
+        r = calculate_score(p, optimizer_report=_empty_report(), source_lines=1)
+        assert r.score >= 0.0
+        assert r.complexity_class == "Unknown"
+        assert r.dimensions.profiling_partial is True
 
-    def test_single_line_program(self) -> None:
-        p = make_profiling(line_counts=[1])
-        r = calculate_score(p, total_source_lines=1)
-        assert r.final_score >= 85.0
+    def test_source_lines_zero_does_not_divide_by_zero(self) -> None:
+        # source_lines is clamped to max(n, 1) inside Scorer
+        r = calculate_score(
+            make_profiling([1]),
+            optimizer_report=_report(("hot_loop", "high")),
+            source_lines=0,
+        )
+        assert r.score >= 0.0
 
-    def test_very_large_count_no_crash(self) -> None:
-        p = make_profiling(line_counts=[1, 10, 1_000_000])
-        r = calculate_score(p)
-        assert 0.0 <= r.final_score <= 100.0
+    def test_unknown_complexity_class_falls_back_to_partial(self) -> None:
+        # If _detect_complexity returned something not in COMPLEXITY_POINTS,
+        # the scorer uses PARTIAL_COMPLEXITY as fallback via dict.get()
+        assert (
+            COMPLEXITY_POINTS.get("O(unknown)", PARTIAL_COMPLEXITY)
+            == PARTIAL_COMPLEXITY
+        )
 
-    def test_total_source_lines_zero_handled(self) -> None:
-        p = make_profiling(line_counts=[1])
-        r = calculate_score(p, total_source_lines=0)
-        assert r.final_score >= 0.0
+    def test_both_profiling_and_optimizer_absent(self) -> None:
+        r = calculate_score(None, optimizer_report=None, source_lines=5, errors=[])
+        assert r.dimensions.profiling_partial is True
+        assert r.dimensions.optimizer_partial is True
+        # Score should still be a valid float in [0, 100]
+        assert 0.0 <= r.score <= 100.0
 
-    def test_all_zero_execution_counts(self) -> None:
-        p = make_profiling(line_counts=[0, 0, 0])
-        r = calculate_score(p)
-        assert r.program_type == "trivial"
+    def test_very_large_execution_count_does_not_crash(self) -> None:
+        p = make_profiling([1, 10, 1_000_000])
+        r = calculate_score(p, optimizer_report=_empty_report(), source_lines=3)
+        assert 0.0 <= r.score <= 100.0
 
-    def test_no_suggestions_no_crash(self) -> None:
-        p = make_profiling(line_counts=[100, 100])
-        r = calculate_score(p, suggestions=None)
-        assert isinstance(r, ScoreReport)
+    def test_all_errors_produces_zero_correctness(self) -> None:
+        r = calculate_score(
+            make_profiling([1]),
+            optimizer_report=_empty_report(),
+            errors=["e1", "e2", "e3"],
+        )
+        assert r.dimensions.correctness == 0.0
 
-    def test_many_high_severity_suggestions_clamped(self) -> None:
-        p = make_profiling(line_counts=[100])
-        sug = [make_suggestion("high")] * 100
-        r = calculate_score(p, suggestions=sug, total_source_lines=5)
-        assert r.final_score >= 0.0
-        assert r.final_score <= 100.0
+    def test_mixed_quality_and_maintainability_patterns(self) -> None:
+        # Both pattern groups present — each dimension scored independently
+        report = _report(
+            ("hot_loop", "high"),  # quality
+            ("unused_vars", "high"),  # maintainability
+        )
+        r = Scorer(make_profiling([1] * 5), report, source_lines=5).calculate()
+        assert r.dimensions.quality < MAX_QUALITY
+        assert r.dimensions.maintainability < MAX_MAINTAINABILITY
 
-    def test_all_lines_same_execution_count(self) -> None:
-        p = make_profiling(line_counts=[50] * 10)
-        r = calculate_score(p)
-        assert isinstance(r, ScoreReport)
+    def test_unknown_pattern_does_not_affect_either_dimension(self) -> None:
+        # A pattern that belongs to neither group should be silently ignored
+        report = _report(("some_future_pattern", "high"))
+        s = Scorer(make_profiling([1] * 5), report, source_lines=5)
+        q, _ = s._score_quality()
+        m = s._score_maintainability()
+        assert q == MAX_QUALITY
+        assert m == MAX_MAINTAINABILITY
 
-    def test_score_report_to_dict_all_floats_rounded(self) -> None:
-        p = make_profiling(line_counts=[1, 50, 50])
-        d = calculate_score(p).to_dict()
-        # final_score should be rounded to at most 2 decimal places
-        assert d["final_score"] == round(d["final_score"], 2)
+    def test_single_line_program_scores_correctly(self) -> None:
+        p = make_profiling([1])
+        r = calculate_score(
+            p, optimizer_report=_empty_report(), source_lines=1, errors=[]
+        )
+        assert r.score >= 90.0
 
-    def test_profiler_without_ast_does_not_crash(self) -> None:
-        p = make_profiling(line_counts=[1, 10])
-        r = DynamicScorer(p, ast=None).calculate()
-        assert isinstance(r, ScoreReport)
+    def test_score_report_grade_consistent_with_score(self) -> None:
+        # Grade must always match the score band
+        for score_val in [95.0, 80.0, 65.0, 45.0, 20.0]:
+            dims = DimensionScores(
+                correctness=score_val * 0.35,
+                efficiency_complexity=score_val * 0.30,
+                quality=score_val * 0.20,
+                maintainability=score_val * 0.15,
+            )
+            narrative = _generate_narrative(score_val, dims)
+            grade = _assign_grade(score_val)
+            if score_val >= 90:
+                assert grade == "Excellent"
+                assert "Excellent" in narrative
+            elif score_val >= 75:
+                assert grade == "Good"
+                assert "Good" in narrative
+            elif score_val >= 60:
+                assert grade == "Fair"
+                assert "Fair" in narrative

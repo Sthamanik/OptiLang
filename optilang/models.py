@@ -1,9 +1,18 @@
 """
 Data models for OptiLang.
+
+Scoring data is no longer stored on OptimizationReport.
+Use ScoreReport (from optilang.scoring) for all score-related data.
+
+Pipeline overview:
+    execute(source)         → ExecutionResult   (output, errors, profiling)
+    Optimizer(...).run()    → OptimizationReport (suggestions only)
+    Scorer(...).calculate() → ScoreReport        (score, dimensions, narrative)
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from .profiler import ProfilingData
 
 
@@ -32,9 +41,12 @@ class Suggestion:
 
 @dataclass
 class OptimizationReport:
-    """Complete optimization analysis report."""
+    """
+    Output of the Optimizer — a ranked list of optimization suggestions.
+
+    Scoring (final score, dimension breakdown, narrative) is handled
+    separately by Scorer and returned as a ScoreReport. Do not add
+    scoring fields here.
+    """
 
     suggestions: List[Suggestion] = field(default_factory=list)
-    optimization_score: float = 100.0
-    score_breakdown: Dict[str, float] = field(default_factory=dict)
-    complexity_analysis: Dict[str, Any] = field(default_factory=dict)
