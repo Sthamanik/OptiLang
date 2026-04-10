@@ -11,7 +11,7 @@ from .optimizer import Optimizer, analyze, analyze_source
 from .parser import parse
 from .scoring import DimensionScores, Scorer, ScoreReport, calculate_score
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"
 
 __all__ = [
     # Core functions

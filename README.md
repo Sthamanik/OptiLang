@@ -1,177 +1,198 @@
 # OptiLang
 
-**A Python-inspired interpreter with real-time code analysis and optimization suggestions**
+A Python-inspired interpreter with built-in profiling, optimization analysis, and scoring.
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
----
+OptiLang `1.0.0` is the first stable release of the project. It ships the full source-to-insight pipeline:
 
-## 🎯 Project Overview
+`source -> tokens -> AST -> semantic checks -> execution -> profiling -> optimization suggestions -> score`
 
-OptiLang is an educational interpreter for a Python-like language (PyLite) that provides:
-- **Real-time code execution** with line-by-line profiling
-- **Optimization suggestions** based on detected anti-patterns
-- **Quantitative scoring** (0-100) for code quality
-- **Pattern detection** for 8+ common performance issues
+## Release Highlights
 
----
+- Python-like language core with variables, control flow, functions, recursion, lists, dictionaries, and exception handling
+- Runtime execution with line-level and function-level profiling
+- Ten optimization detectors for performance and maintainability issues
+- Four-dimension scoring system with a final `0-100` score, grade, and narrative explanation
+- End-to-end Python API for execution, analysis, and scoring
 
-## 🚀 Quick Start
+## Quick Start
 
-### Installation
+### Install From Source
 
 ```bash
-pip install optilang
+git clone https://github.com/Sthamanik/optilang.git
+cd optilang
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
 ```
 
-### Basic Usage
+### End-to-End Example
 
 ```python
-from optilang import execute, analyze
+from optilang import analyze, calculate_score, execute
+from optilang.lexer import tokenize
+from optilang.parser import parse
 
-# Execute PyLite code
-result = execute("""
-def factorial(n):
-    if n <= 1:
-        return 1
-    return n * factorial(n - 1)
+source = """
+total = 0
+for i in range(10):
+    total += i
+print(total)
+"""
 
-print(factorial(5))
-""")
+result = execute(source)
+ast = parse(tokenize(source))
+report = analyze(ast, result.profiling, result.symbol_table)
+score = calculate_score(
+    profiling_data=result.profiling.to_dict() if result.profiling else None,
+    optimizer_report=report,
+    source_lines=source.count("\n") + 1,
+    errors=result.errors,
+)
 
-print(result.output)  # "120"
-print(f"Execution time: {result.execution_time}ms")
+print(result.output)                # 45
+print(score.grade, score.score)     # e.g. Excellent 95.0
+print(score.complexity_class)       # e.g. O(n)
 
-# Analyze code for optimizations
-report = analyze("""
-for i in range(100):
-    for j in range(100):
-        result = i * j
-""")
-
-print(f"Optimization Score: {report.optimization_score}/100")
 for suggestion in report.suggestions:
-    print(f"Line {suggestion.line}: {suggestion.description}")
+    print(f"{suggestion.pattern}: {suggestion.description}")
 ```
 
----
+If you only need optimization suggestions from source text, use `analyze_source(source)` from `optilang` or `optilang.optimizer`.
 
 ## 🏗️ Architecture
 
 ```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│  Lexer   │ -> │  Parser  │ -> │ Executor │ -> │ Profiler │
-│ (Tokens) │    │  (AST)   │    │ (Runtime)│    │ (Metrics)│
-└──────────┘    └──────────┘    └──────────┘    └──────────┘
-                                       │              │
-                                       v              v
-                                 ┌──────────┐    ┌──────────┐
-                                 │Optimizer │    │  Scorer  │
-                                 │(Patterns)│    │ (0-100)  │
-                                 └──────────┘    └──────────┘
+┌──────────┐    ┌──────────┐    ┌─────────────┐    ┌──────────┐    ┌──────────┐
+│  Lexer   │ -> │  Parser  │ -> │  Semantic   │ -> │ Executor │ -> │ Profiler │
+│ (Tokens) │    │  (AST)   │    │ (Annot AST) │    │ (Runtime)│    │ (Metrics)│
+└──────────┘    └──────────┘    └─────────────┘    └──────────┘    └──────────┘
+                                                         │              │
+                                                         v              v
+                                                   ┌──────────┐    ┌──────────┐
+                                                   │Optimizer │    │  Scorer  │
+                                                   │(Patterns)│    │ (0-100)  │
+                                                   └──────────┘    └──────────┘
 ```
 
----
+## What OptiLang Supports
 
-## 📋 Features
+### Language Features
 
-### Current (v0.1.0)
-- [x] Lexical analysis (tokenization)
-- [x] Syntax parsing (AST generation)
-- [x] Code execution (variables, functions, control flow)
-- [x] Basic profiling (execution time, line counts)
+- Numbers, strings, booleans, and `None`
+- Arithmetic, comparison, logical, unary, and augmented assignment operators
+- Variables and lexical scoping
+- `if` / `elif` / `else`
+- `while` and `for ... in ...`
+- `break`, `continue`, and `pass`
+- Function definitions, calls, parameters, returns, and recursion
+- Lists, dictionaries, and index access
+- `try` / `except` / `finally`
 
-### Planned
-- [ ] Advanced profiling (memory usage, call graphs)
-- [ ] 8+ optimization patterns
-- [ ] ML-based suggestion ranking (optional)
-- [ ] Optimization score calculation
-- [ ] Comprehensive documentation
+### Built-In Functions and Types
 
----
+- `print`
+- `range`
+- `len`
+- `str`
+- `int`
+- `float`
+- `bool`
+- `list`
+- `dict`
 
-## 🛠️ Development Setup
+## Analysis Features
+
+### Profiling
+
+Execution returns `ExecutionResult`, which can include:
+
+- Captured program output
+- Execution time
+- Line execution counts and timings
+- Function call counts and recursion depth
+- Peak memory estimate
+- Heuristic complexity estimate
+- Final symbol table
+
+### Optimization Detectors
+
+OptiLang `1.0.0` ships with ten detectors:
+
+1. `unused_vars`
+2. `dead_code`
+3. `constant_folding`
+4. `early_return`
+5. `loop_invariant`
+6. `string_concat_loop`
+7. `nested_loops`
+8. `hot_loop`
+9. `repeated_computation`
+10. `expensive_calls`
+
+### Scoring
+
+`calculate_score(...)` returns a `ScoreReport` with:
+
+- Final score from `0` to `100`
+- Grade label such as `Excellent`, `Good`, or `Fair`
+- Complexity class
+- Dimension breakdown for correctness, efficiency/complexity, quality, and maintainability
+- Beginner-friendly narrative summary
+
+## Project Layout
+
+```text
+optilang/
+  lexer.py
+  parser.py
+  semantic_analyzer.py
+  executor.py
+  profiler.py
+  optimizer.py
+  scoring.py
+  models.py
+tests/
+docs/
+```
+
+## Documentation
+
+- [Documentation Index](docs/README.md)
+- [User Guide](docs/USER_GUIDE.md)
+- [API Reference](docs/API_REFERENCE.md)
+- [Contributing Guide](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+
+## Development
 
 ```bash
-# Clone repository
-git clone https://github.com/Sthamanik/optilang.git
-cd optilang
-
-# Create virtual environment
-conda create -n optilang python -y
-conda activate optilang
-
-# Install in editable mode with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Format code
-black optilang/
-
-# Type checking
-mypy optilang/
-
-# Linting
-flake8 optilang/
+python3 -m pip install -e ".[dev]"
+python3 -m pytest
+black optilang tests
+mypy optilang
+flake8 optilang
 ```
 
----
+## Contributing
 
-## 📚 Documentation
+See [CONTRIBUTING.md](CONTRIBUTING.md) for workflow, quality checks, and documentation expectations.
 
-- **User Guide**: Coming soon
-- **API Reference**: Coming soon
-- **Contributing Guide**: See [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Changelog**: See [CHANGELOG.md](CHANGELOG.md)
+## License
 
----
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-## 🧪 Testing
+## Team
 
-```bash
-# Run all tests
-pytest
+- Manik Kumar Shrestha - [GitHub](https://github.com/Sthamanik)
+- Om Shree Mahat - [GitHub](https://github.com/itsomshree)
+- Aashish Rimal - [GitHub](https://github.com/aashishrimal22)
 
-# Run with coverage
-pytest --cov=optilang --cov-report=html
+## Contact
 
-# View coverage report
-open htmlcov/index.html  # Linux/Mac
-# or start htmlcov/index.html on Windows
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 👥 Team
-
-- **Manik Kumar Shrestha** - [GitHub](https://github.com/Sthamanik)
-- **Om Shree Mahat** - [GitHub](https://github.com/itsomshree)
-- **Aashish Rimal** - [GitHub](https://github.com/aashishrimal22)
-
----
-
-## 📧 Contact
-
-For questions or feedback:
-- **Email**: shresthamanik1820@gmail.com
-- **Issues**: [GitHub Issues](https://github.com/Sthamanik/optilang/issues)
-
----
-
-**⭐ Star this repository if you find it useful!**
+- Email: shresthamanik1820@gmail.com
+- Issues: [GitHub Issues](https://github.com/Sthamanik/optilang/issues)

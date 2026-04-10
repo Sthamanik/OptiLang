@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optilang"
-version = "0.1.0"
-description = "A Python-inspired interpreter with real-time code analysis and optimization suggestions"
+version = "1.0.0"
+description = "A Python-inspired interpreter with profiling, optimization analysis, and scoring"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["interpreter", "optimization", "profiling", "static-analysis", "education"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
     "License :: OSI Approved :: MIT License",
@@ -49,7 +49,7 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/Sthamanik/optilang"
-Documentation = "https://optilang.readthedocs.io"
+Documentation = "https://github.com/Sthamanik/optilang/tree/main/docs"
 Repository = "https://github.com/Sthamanik/optilang"
 Issues = "https://github.com/Sthamanik/optilang/issues"
 
