@@ -5,6 +5,8 @@ A Python-inspired interpreter with built-in profiling, optimization analysis, an
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![PyPI version](https://img.shields.io/pypi/v/optilang.svg)](https://pypi.org/project/optilang/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/optilang.svg)](https://pypi.org/project/optilang/)
 
 OptiLang `1.0.0` is the first stable release of the project. It ships the full source-to-insight pipeline:
 
