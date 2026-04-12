@@ -143,9 +143,7 @@ class TestEstimateMemoryBytes:
     def test_deep_mode_dict_budget_breaks_on_next_iteration(self) -> None:
         env = {"x": {"a": 1, "b": 2}}
         assert (
-            estimate_memory_bytes(
-                env, mode="deep", deep_max_depth=5, deep_max_items=2
-            )
+            estimate_memory_bytes(env, mode="deep", deep_max_depth=5, deep_max_items=2)
             > 0
         )
 
@@ -155,9 +153,7 @@ class TestEstimateMemoryBytes:
     def test_deep_mode_list_budget_breaks_on_next_iteration(self) -> None:
         env = {"x": [1, 2, 3]}
         assert (
-            estimate_memory_bytes(
-                env, mode="deep", deep_max_depth=5, deep_max_items=1
-            )
+            estimate_memory_bytes(env, mode="deep", deep_max_depth=5, deep_max_items=1)
             > 0
         )
 

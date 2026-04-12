@@ -159,15 +159,11 @@ class TestOptimizationReport:
 
     def test_optimization_score_field_does_not_exist(self) -> None:
         report = OptimizationReport()
-        assert not hasattr(
-            report, "optimization_score"
-        ), "use ScoreReport.score"
+        assert not hasattr(report, "optimization_score"), "use ScoreReport.score"
 
     def test_score_breakdown_field_does_not_exist(self) -> None:
         report = OptimizationReport()
-        assert not hasattr(
-            report, "score_breakdown"
-        ), "use ScoreReport.dimensions"
+        assert not hasattr(report, "score_breakdown"), "use ScoreReport.dimensions"
 
     def test_complexity_analysis_field_does_not_exist(self) -> None:
         report = OptimizationReport()
@@ -186,7 +182,8 @@ class TestOptimizationReport:
     def test_constructor_rejects_complexity_analysis_kwarg(self) -> None:
         with pytest.raises(TypeError):
             OptimizationReport(
-                complexity_analysis={"class": "O(n)"})  # type: ignore[call-arg]
+                complexity_analysis={"class": "O(n)"}
+            )  # type: ignore[call-arg]
 
     # ── Suggestions behaviour ─────────────────────────────────────────────
 

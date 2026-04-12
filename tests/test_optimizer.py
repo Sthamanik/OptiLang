@@ -614,7 +614,9 @@ class TestOptimizerHelpers:
                     value=DictNode(
                         1,
                         11,
-                        pairs=[(StringNode(1, 12, "k"), IdentifierNode(1, 18, "value"))],
+                        pairs=[
+                            (StringNode(1, 12, "k"), IdentifierNode(1, 18, "value"))
+                        ],
                     ),
                 )
             ],
@@ -697,9 +699,7 @@ class TestOptimizerHelpers:
             "    else:\n"
             "        return 0\n"
             "    print(x)\n",
-            "def choose(x):\n"
-            "    if x > 0:\n"
-            "        return x\n",
+            "def choose(x):\n" "    if x > 0:\n" "        return x\n",
             "def choose(x):\n"
             "    if x > 0:\n"
             "        return x\n"
@@ -720,10 +720,7 @@ class TestOptimizerHelpers:
         assert detect_loop_invariant(ast, profiling=None, symbol_table=None) == []
 
         ast = _parse(
-            "n = 3\n"
-            "for i in range(n):\n"
-            "    limit = n * 2\n"
-            "    print(limit)\n"
+            "n = 3\n" "for i in range(n):\n" "    limit = n * 2\n" "    print(limit)\n"
         )
         profiling = ProfilingData(line_stats={3: _line_stats(3, 3)})
         assert detect_loop_invariant(ast, profiling=profiling, symbol_table=None) == []
@@ -736,7 +733,10 @@ class TestOptimizerHelpers:
 
         low = _parse('result = ""\nfor i in range(3):\n    result += "x"\n')
         low_profiling = ProfilingData(line_stats={3: _line_stats(3, 3)})
-        assert detect_string_concat(low, low_profiling, {"result": ""})[0].severity == "low"
+        assert (
+            detect_string_concat(low, low_profiling, {"result": ""})[0].severity
+            == "low"
+        )
 
         high = _parse('result = ""\nfor i in range(600):\n    result += "x"\n')
         high_profiling = ProfilingData(line_stats={3: _line_stats(3, 600)})
@@ -759,9 +759,7 @@ class TestOptimizerHelpers:
 
     def test_innermost_count_and_hot_loop_edge_cases(self) -> None:
         ast = _parse(
-            "for i in range(2):\n"
-            "    for j in range(2):\n"
-            "        x = i + j\n"
+            "for i in range(2):\n" "    for j in range(2):\n" "        x = i + j\n"
         )
         outer = ast.statements[0]
         assert isinstance(outer, ForNode)
@@ -859,12 +857,7 @@ class TestOptimizerHelpers:
         )
         assert detect_repeated_computation(same_line_ast) == []
 
-        with_intervening_write = _parse(
-            "n = 1\n"
-            "a = n * 2\n"
-            "n = 3\n"
-            "b = n * 2\n"
-        )
+        with_intervening_write = _parse("n = 1\n" "a = n * 2\n" "n = 3\n" "b = n * 2\n")
         assert detect_repeated_computation(with_intervening_write) == []
 
         gated = _parse("n = 1\nx = n * 2\ny = n * 2\n")
@@ -898,7 +891,9 @@ class TestOptimizerHelpers:
 
         def fake_sorted(iterable: object, *args: object, **kwargs: object):
             items = list(iterable)
-            if items and all(isinstance(item, tuple) and len(item) == 2 for item in items):
+            if items and all(
+                isinstance(item, tuple) and len(item) == 2 for item in items
+            ):
                 return items
             return original_sorted(items, *args, **kwargs)
 

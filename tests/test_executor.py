@@ -551,7 +551,9 @@ class TestExecutorEdgeCases:
 
         result = executor.run(_program("def f():\n    return f()\nf()"))
 
-        assert any("Maximum recursion depth (0) exceeded" in error for error in result.errors)
+        assert any(
+            "Maximum recursion depth (0) exceeded" in error for error in result.errors
+        )
 
     def test_run_wraps_unexpected_python_exception(
         self, monkeypatch: pytest.MonkeyPatch
@@ -626,7 +628,9 @@ class TestExecutorEdgeCases:
     def test_apply_augmented_op_rejects_unknown_operator(self) -> None:
         executor = Executor(enable_profiling=False)
 
-        with pytest.raises(OptiRuntimeError, match="Unsupported augmented operator: %="):
+        with pytest.raises(
+            OptiRuntimeError, match="Unsupported augmented operator: %="
+        ):
             executor._apply_augmented_op(
                 "%=",
                 4,

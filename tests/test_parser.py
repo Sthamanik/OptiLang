@@ -858,7 +858,9 @@ class TestParserInternals:
     def test_match_returns_false_when_current_token_is_none(self) -> None:
         assert Parser([]).match(TokenType.NUMBER) is False
 
-    def test_parse_wraps_unexpected_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_parse_wraps_unexpected_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         parser = Parser(tokenize("x = 1"))
 
         def boom() -> list[ASTNode]:
