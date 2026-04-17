@@ -3,23 +3,29 @@ tests/test_scoring.py
 ---------------------
 Comprehensive test suite for optilang/scoring.py.
 
-Covers every testable behaviour introduced or changed in the current version:
+Covers every testable behaviour in the current version:
 
-    Correctness scoring          — smooth 5-step scale (fix #5)
     Pattern classification       — EFFICIENCY / QUALITY / MAINTAINABILITY sets
                                    including constant_folding in MAINTAINABILITY
-                                   (fix #3)
-    Partial-credit flags         — profiling_partial, optimizer_partial (fix #1)
-    Density-to-score             — linear interpolation, no step cliffs (fix #6)
+    Correctness scoring          — density-based (errors / source_lines),
+                                   same-size program judged proportionally
+    Density-to-score             — linear interpolation, no step cliffs
     Complexity detection         — all eight Big-O classes
-    Efficiency sub-score         — independent of complexity sub-score
+    Coverage-weighted complexity — hot_coverage blending: tiny hot path in a
+                                   large program is penalised far less than a
+                                   fully quadratic program
+    Efficiency sub-score         — independent of complexity sub-score,
+                                   sourced from EFFICIENCY_PATTERNS only
     Quality scoring              — dead_code, string_concat_loop only
     Maintainability scoring      — unused_vars, early_return, nested_loops,
                                    constant_folding
+    Partial-credit flags         — profiling_partial, optimizer_partial
     Grade assignment             — all five grade bands
-    Lowest-dimension selection   — normalised ratio + tie-breaking (fix #7)
-    Narrative generation         — headline tier, hint content, partial notes
-                                   (fixes #2, #4)
+    Dimension ranking            — normalised ratio + tie-breaking by max
+    Narrative generation         — dynamic hints from actual findings only,
+                                   perfect score says no false weakest area,
+                                   multiple weak dims all mentioned
+    Dynamic hint building        — _build_dimension_hint specificity
     ScoreReport.to_dict          — serialisable output shape
     calculate_score              — public API end-to-end
     Score clamping               — final score never exceeds 100 or goes below 0
@@ -34,8 +40,8 @@ Run with:
 
 from __future__ import annotations
 
-import random
 import sys
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -47,22 +53,26 @@ import pytest
 # ---------------------------------------------------------------------------
 sys.path.insert(0, ".")
 
-import optilang.scoring as sc  # noqa: E402  (import after sys.path tweak)
-from optilang.scoring import (  # noqa: E402
+import optilang.scoring as sc   # noqa: E402  (import after sys.path tweak)
+from optilang.scoring import (   # noqa: E402
     COMPLEXITY_POINTS,
     EFFICIENCY_PATTERNS,
-    MAINTAINABILITY_PATTERNS,
+    MAX_CORRECTNESS,
+    MAX_EFFICIENCY_COMPLEXITY,
     MAX_MAINTAINABILITY,
     MAX_QUALITY,
+    MAINTAINABILITY_PATTERNS,
     PARTIAL_COMPLEXITY,
     PARTIAL_EFFICIENCY,
     PARTIAL_MAINTAINABILITY,
     PARTIAL_QUALITY,
     QUALITY_PATTERNS,
     DimensionScores,
-    Scorer,
     ScoreReport,
+    Scorer,
     _assign_grade,
+    _build_dimension_hint,
+    _coverage_weighted_complexity,
     _density_to_score,
     _detect_complexity,
     _generate_narrative,
@@ -182,53 +192,114 @@ class TestPatternSets:
 
 class TestCorrectnessScoring:
     """
-    The new scale is: 35 / 25 / 15 / 5 / 0 for 0 / 1 / 2 / 3 / 4+ errors.
-
-    The old scale (35 → 10 → 0) caused a 25-point cliff for one error.
+    Correctness uses error density (errors / source_lines) fed through
+    _density_to_score, so the same number of errors scores very differently
+    depending on program size. This is the core dynamic scoring behaviour.
     """
 
     def test_zero_errors_full_marks(self) -> None:
         sr = _score(errors=[])
         assert sr.dimensions.correctness == 35.0
 
-    def test_one_error_smooth_deduction(self) -> None:
-        sr = _score(errors=["err1"])
-        assert sr.dimensions.correctness == 25.0
+    def test_zero_errors_any_size_full_marks(self) -> None:
+        for lines in [1, 5, 50, 200]:
+            sr = calculate_score(
+                profiling_data={"line_stats": _make_line_stats(*[1] * lines)},
+                optimizer_report=_clean_report(),
+                source_lines=lines,
+                errors=[],
+            )
+            assert sr.dimensions.correctness == 35.0, (
+                f"Zero errors in {lines}-line program must score 35.0"
+            )
 
-    def test_two_errors(self) -> None:
-        sr = _score(errors=["err1", "err2"])
-        assert sr.dimensions.correctness == 15.0
+    def test_more_errors_lower_score(self) -> None:
+        """More errors in same-size program → lower correctness."""
+        sr1 = _score(errors=["e"] * 1, source_lines=20)
+        sr3 = _score(errors=["e"] * 3, source_lines=20)
+        assert sr1.dimensions.correctness > sr3.dimensions.correctness
 
-    def test_three_errors(self) -> None:
-        sr = _score(errors=["e1", "e2", "e3"])
-        assert sr.dimensions.correctness == 5.0
+    def test_same_errors_larger_program_scores_higher(self) -> None:
+        """
+        Core dynamic scoring test: 4 errors in 100 lines is much better
+        than 4 errors in 5 lines. Larger program must score higher.
+        """
+        sr_small = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(*[1] * 5)},
+            optimizer_report=_clean_report(),
+            source_lines=5,
+            errors=["e"] * 4,
+        )
+        sr_large = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(*[1] * 100)},
+            optimizer_report=_clean_report(),
+            source_lines=100,
+            errors=["e"] * 4,
+        )
+        assert sr_large.dimensions.correctness > sr_small.dimensions.correctness, (
+            "100-line program with 4 errors should score higher than "
+            "5-line program with 4 errors"
+        )
 
-    def test_four_errors_zero(self) -> None:
-        sr = _score(errors=["e1", "e2", "e3", "e4"])
-        assert sr.dimensions.correctness == 0.0
+    def test_high_error_density_low_score(self) -> None:
+        """A program where errors > 60% of lines should score poorly."""
+        sr = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(1, 1, 1, 1, 1)},
+            optimizer_report=_clean_report(),
+            source_lines=5,
+            errors=["e"] * 3,   # 3/5 = 0.60 density
+        )
+        # density=0.6 → 60% of max = 21.0
+        assert sr.dimensions.correctness <= 21.5
 
-    def test_many_errors_zero(self) -> None:
-        sr = _score(errors=["e"] * 20)
-        assert sr.dimensions.correctness == 0.0
+    def test_low_error_density_high_score(self) -> None:
+        """A program with < 5% error density should score near-perfect."""
+        sr = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(*[1] * 100)},
+            optimizer_report=_clean_report(),
+            source_lines=100,
+            errors=["e"] * 4,   # 4/100 = 0.04 density
+        )
+        # density=0.04 is between 0.0 and 0.3 anchors → near 80% of max
+        assert sr.dimensions.correctness >= 28.0
 
-    def test_error_count_matches_list_length(self) -> None:
+    def test_correctness_uses_density_not_raw_count(self) -> None:
+        """
+        Prove it's density-based: 3 errors in 5 lines must score LOWER
+        than 3 errors in 50 lines.
+        """
+        sr_dense = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(*[1] * 5)},
+            optimizer_report=_clean_report(),
+            source_lines=5,
+            errors=["e"] * 3,
+        )
+        sr_sparse = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(*[1] * 50)},
+            optimizer_report=_clean_report(),
+            source_lines=50,
+            errors=["e"] * 3,
+        )
+        assert sr_sparse.dimensions.correctness > sr_dense.dimensions.correctness
+
+    def test_correctness_never_exceeds_max(self) -> None:
+        for errs in [0, 1, 5, 10]:
+            sr = _score(errors=["e"] * errs, source_lines=20)
+            assert sr.dimensions.correctness <= 35.0
+
+    def test_correctness_never_below_floor(self) -> None:
+        """Even catastrophic error rate stays at or above 10% of max."""
+        sr = calculate_score(
+            profiling_data={"line_stats": _make_line_stats(1, 1, 1)},
+            optimizer_report=_clean_report(),
+            source_lines=3,
+            errors=["e"] * 100,   # density >> 2.0
+        )
+        assert sr.dimensions.correctness >= 35.0 * 0.10 - 0.01
+
+    def test_error_count_in_report(self) -> None:
         sr = _score(errors=["a", "b", "c"])
         assert sr.error_count == 3
-
-    def test_step_between_0_and_1_error_is_10(self) -> None:
-        """The step from 0→1 error must be exactly 10 points, not 25 (old cliff)."""
-        sr0 = _score(errors=[])
-        sr1 = _score(errors=["x"])
-        assert sr0.dimensions.correctness - sr1.dimensions.correctness == 10.0
-
-    def test_each_step_is_equal(self) -> None:
-        """Each additional error costs exactly 10 points up to 3 errors."""
-        scores = [
-            _score(errors=["e"] * n).dimensions.correctness
-            for n in range(4)
-        ]
-        steps = [scores[i] - scores[i + 1] for i in range(3)]
-        assert all(s == 10.0 for s in steps), f"Steps are not uniform: {steps}"
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +437,75 @@ class TestComplexityDetection:
 
 
 # ---------------------------------------------------------------------------
-# 5. Efficiency sub-score — independent of complexity (core redesign goal)
+# 4b. Coverage-weighted complexity scoring
 # ---------------------------------------------------------------------------
+
+
+class TestCoverageWeightedComplexity:
+    """
+    _coverage_weighted_complexity blends the base complexity penalty with
+    hot_coverage (fraction of lines in the hot path). A tiny quadratic
+    section in a large program is penalised far less than a fully
+    quadratic program.
+    """
+
+    def _cwc(self, cls: str, *counts: int) -> float:
+        from optilang.scoring import _coverage_weighted_complexity
+        stats = _make_line_stats(*counts)
+        return _coverage_weighted_complexity(cls, stats)
+
+    def test_perfect_classes_always_15(self) -> None:
+        for cls in ["O(1)", "O(log n)"]:
+            assert self._cwc(cls, 1, 1, 1) == 15.0
+
+    def test_tiny_hot_path_near_perfect(self) -> None:
+        """2 quadratic lines in 200-line program → near full marks."""
+        counts = [1] * 198 + [10000, 10000]
+        score = self._cwc("O(n²)", *counts)
+        assert score >= 14.0, (
+            f"Tiny hot path should score near 15, got {score}"
+        )
+
+    def test_fully_hot_program_full_penalty(self) -> None:
+        """Program fully in hot path → close to base COMPLEXITY_POINTS value."""
+        counts = [10000, 10000, 10000, 10000, 10000]
+        score = self._cwc("O(n²)", *counts)
+        base = COMPLEXITY_POINTS["O(n²)"]   # 6.0
+        assert score <= base + 1.5, (
+            f"Fully hot O(n²) should score near {base}, got {score}"
+        )
+
+    def test_larger_hot_coverage_lower_score(self) -> None:
+        """More of the program in the hot path → lower score."""
+        small_hot = self._cwc("O(n²)", *([1] * 18 + [10000, 10000]))  # 2/20
+        large_hot = self._cwc("O(n²)", *([10000] * 10 + [1] * 10))    # 10/20
+        assert large_hot < small_hot
+
+    def test_score_in_valid_range(self) -> None:
+        for cls in COMPLEXITY_POINTS:
+            score = self._cwc(cls, 1, 100, 10000, 1)
+            assert 0.0 <= score <= 15.0, (
+                f"{cls} produced out-of-range score {score}"
+            )
+
+    def test_empty_line_stats_returns_base(self) -> None:
+        from optilang.scoring import _coverage_weighted_complexity
+        score = _coverage_weighted_complexity("O(n²)", {})
+        assert score == COMPLEXITY_POINTS["O(n²)"]
+
+    def test_all_zero_counts_returns_perfect(self) -> None:
+        """No execution → treat as O(1) (no evidence of complexity)."""
+        score = self._cwc("O(n²)", 0, 0, 0)
+        assert score == 15.0
+
+    def test_same_class_larger_program_penalised_less(self) -> None:
+        """
+        Same O(n²) class, but small program is fully quadratic while large
+        program has only a tiny quadratic section. Large program scores higher.
+        """
+        small_score = self._cwc("O(n²)", 1, 100, 10000, 10000, 1)
+        large_score = self._cwc("O(n²)", *([1] * 195 + [10000, 10000, 10000, 10000, 1]))
+        assert large_score > small_score
 
 
 class TestEfficiencySubScore:
@@ -399,8 +537,10 @@ class TestEfficiencySubScore:
     def test_good_complexity_poor_efficiency_independent(self) -> None:
         """
         O(n) complexity + loop_invariant violation:
-        complexity sub-score should be good (13), efficiency sub-score bad.
+        complexity sub-score should be good, efficiency sub-score bad.
         The two values must differ — they measure different things.
+        Coverage-weighted: O(n) with a loop gives moderate hot_coverage,
+        so complexity_sub will be between 13 and 15, not exactly 13.
         """
         suggestions = [_Suggestion("loop_invariant", "high")] * 5
         sr = _score(
@@ -408,8 +548,9 @@ class TestEfficiencySubScore:
             suggestions=suggestions,
             source_lines=4,
         )
-        assert sr.dimensions.complexity_subscore == 13.0   # O(n) = 13 pts
-        assert sr.dimensions.efficiency_subscore < 13.0    # penalised
+        # Complexity sub should reflect O(n) class but be coverage-weighted
+        assert sr.dimensions.complexity_subscore >= 10.0    # O(n) is good
+        assert sr.dimensions.efficiency_subscore < 10.0     # penalised heavily
 
     def test_all_efficiency_patterns_counted(self) -> None:
         """Every pattern in EFFICIENCY_PATTERNS must reduce the efficiency sub-score."""
@@ -784,7 +925,7 @@ class TestRankDimensions:
 
 
 # ---------------------------------------------------------------------------
-# 11. Narrative generation — multi-dimension, perfect-score-aware
+# 11. Narrative generation — dynamic, suggestion-specific hints
 # ---------------------------------------------------------------------------
 
 
@@ -797,9 +938,15 @@ class TestNarrativeGeneration:
         - list actionable dimensions in order of most absolute points missing
         - give a gentle single-dimension note when all dims are healthy but
           not all perfect
+        - include ONLY the issues that were actually detected — no generic
+          laundry lists of every possible problem in a dimension
         - include accurate partial-credit notes when data was unavailable
-        - include the right hint keywords for each dimension mentioned
     """
+
+    @dataclass
+    class _Sugg:
+        pattern: str
+        severity: str
 
     def _dims_with_lowest(self, lowest: str) -> DimensionScores:
         """Create DimensionScores where only the specified dimension is bad."""
@@ -819,6 +966,20 @@ class TestNarrativeGeneration:
             d.maintainability = 0.0
         return d
 
+    def _narrative(
+        self,
+        score: float,
+        dims: DimensionScores,
+        complexity_class: str = "O(n)",
+        suggestions: Optional[List] = None,
+    ) -> str:
+        return _generate_narrative(
+            score,
+            dims,
+            complexity_class=complexity_class,
+            all_suggestions=suggestions or [],
+        )
+
     # ── Grade headlines ───────────────────────────────────────────────
 
     def test_excellent_headline(self) -> None:
@@ -826,120 +987,197 @@ class TestNarrativeGeneration:
             correctness=35.0, efficiency_complexity=30.0,
             quality=20.0, maintainability=15.0,
         )
-        narrative = _generate_narrative(95.0, dims)
-        assert "Excellent" in narrative
+        assert "Excellent" in self._narrative(95.0, dims)
 
     def test_good_headline(self) -> None:
         dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(80.0, dims)
-        assert "Good" in narrative
+        assert "Good" in self._narrative(80.0, dims)
 
     def test_fair_headline(self) -> None:
         dims = self._dims_with_lowest("Quality")
-        narrative = _generate_narrative(65.0, dims)
-        assert "Fair" in narrative
+        assert "Fair" in self._narrative(65.0, dims)
 
     def test_poor_headline(self) -> None:
         dims = self._dims_with_lowest("Correctness")
-        narrative = _generate_narrative(45.0, dims)
-        assert "needs some work" in narrative.lower() or "poor" in narrative.lower()
+        n = self._narrative(45.0, dims)
+        assert "needs some work" in n.lower() or "poor" in n.lower()
 
     def test_critical_headline(self) -> None:
         dims = self._dims_with_lowest("Correctness")
-        narrative = _generate_narrative(20.0, dims)
-        assert "significant issues" in narrative.lower()
+        n = self._narrative(20.0, dims)
+        assert "significant issues" in n.lower()
 
-    # ── Perfect score: no "weakest area" mentioned ────────────────────
+    # ── Perfect score: no false "weakest area" ────────────────────────
 
     def test_perfect_score_no_weakest_area_mention(self) -> None:
-        """
-        Sample 1 fix: score=100 with all dims perfect must NOT say
-        'your weakest area is Correctness' or any similar false claim.
-        """
         dims = DimensionScores(
             correctness=35.0, efficiency_complexity=30.0,
             quality=20.0, maintainability=15.0,
         )
-        narrative = _generate_narrative(100.0, dims)
-        assert "weakest area" not in narrative.lower()
-        assert "area to improve" not in narrative.lower()
-        assert "full marks" in narrative.lower()
+        n = self._narrative(100.0, dims)
+        assert "weakest area" not in n.lower()
+        assert "area to improve" not in n.lower()
+        assert "full marks" in n.lower()
 
     def test_perfect_score_positive_only_narrative(self) -> None:
         dims = DimensionScores(
             correctness=35.0, efficiency_complexity=30.0,
             quality=20.0, maintainability=15.0,
         )
-        narrative = _generate_narrative(100.0, dims)
-        # Should be purely congratulatory
-        assert "Excellent" in narrative
-        assert "every dimension" in narrative.lower() or "full marks" in narrative.lower()
+        n = self._narrative(100.0, dims)
+        assert "Excellent" in n
+        assert "every dimension" in n.lower() or "full marks" in n.lower()
+
+    # ── Specificity: only detected issues are mentioned ───────────────
+
+    def test_no_nested_loop_mention_when_none_detected(self) -> None:
+        """
+        Core fix: a program with O(n) complexity and only an unused_vars
+        suggestion must NOT mention nested loops in the narrative.
+        """
+        dims = DimensionScores(
+            correctness=35.0,
+            efficiency_complexity=28.0,   # O(n)=13 + efficiency=15
+            quality=20.0,
+            maintainability=13.9,         # unused_vars deduction
+            complexity_subscore=13.0,
+            efficiency_subscore=15.0,
+        )
+        suggs = [self._Sugg("unused_vars", "low")]
+        n = self._narrative(96.9, dims, complexity_class="O(n)", suggestions=suggs)
+        assert "nested loop" not in n.lower(), (
+            "Narrative must not mention nested loops when none were detected"
+        )
+
+    def test_loop_invariant_mentioned_only_when_detected(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0, efficiency_complexity=20.0,
+            quality=20.0, maintainability=15.0,
+            complexity_subscore=13.0, efficiency_subscore=7.0,
+        )
+        suggs = [self._Sugg("loop_invariant", "medium")]
+        n = self._narrative(90.0, dims, complexity_class="O(n)", suggestions=suggs)
+        assert "invariant" in n.lower() or "never changes" in n.lower()
+
+    def test_loop_invariant_not_mentioned_when_not_detected(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0, efficiency_complexity=20.0,
+            quality=20.0, maintainability=15.0,
+            complexity_subscore=13.0, efficiency_subscore=7.0,
+        )
+        # No suggestions — only complexity sub-score is below perfect
+        n = self._narrative(90.0, dims, complexity_class="O(n)", suggestions=[])
+        assert "invariant" not in n.lower()
+
+    def test_unused_vars_mentioned_only_when_detected(self) -> None:
+        dims = self._dims_with_lowest("Maintainability")
+        suggs = [self._Sugg("unused_vars", "low")]
+        n = self._narrative(80.0, dims, suggestions=suggs)
+        assert "never used" in n.lower() or "assigned but never" in n.lower()
+
+    def test_dead_code_mentioned_only_when_detected(self) -> None:
+        dims = self._dims_with_lowest("Quality")
+        suggs = [self._Sugg("dead_code", "medium")]
+        n = self._narrative(65.0, dims, suggestions=suggs)
+        assert "dead" in n.lower() or "never execute" in n.lower()
+
+    def test_complexity_class_mentioned_in_efficiency_hint(self) -> None:
+        """Complexity class is surfaced when complexity_sub < 15."""
+        dims = DimensionScores(
+            correctness=35.0, efficiency_complexity=28.0,
+            quality=20.0, maintainability=15.0,
+            complexity_subscore=13.0, efficiency_subscore=15.0,
+        )
+        n = self._narrative(96.0, dims, complexity_class="O(n)", suggestions=[])
+        assert "O(n)" in n or "linear" in n.lower()
+
+    def test_quadratic_complexity_mentioned_when_detected(self) -> None:
+        dims = DimensionScores(
+            correctness=35.0, efficiency_complexity=21.0,
+            quality=20.0, maintainability=15.0,
+            complexity_subscore=6.0, efficiency_subscore=15.0,
+        )
+        n = self._narrative(91.0, dims, complexity_class="O(n²)", suggestions=[])
+        assert "quadratic" in n.lower() or "O(n²)" in n or "nested" in n.lower()
+
+    def test_no_complexity_hint_when_complexity_perfect(self) -> None:
+        """When complexity_sub=15 (O(1) or O(log n)), no complexity message needed."""
+        dims = DimensionScores(
+            correctness=35.0, efficiency_complexity=22.0,
+            quality=20.0, maintainability=15.0,
+            complexity_subscore=15.0, efficiency_subscore=7.0,
+        )
+        suggs = [self._Sugg("repeated_computation", "medium")]
+        n = self._narrative(92.0, dims, complexity_class="O(1)", suggestions=suggs)
+        # Should mention the repeated_computation but not any complexity class
+        assert "repeated" in n.lower() or "same expression" in n.lower()
+        assert "quadratic" not in n.lower()
+        assert "linear" not in n.lower()
 
     # ── Multiple actionable dimensions all mentioned ──────────────────
 
     def test_two_bad_dims_both_mentioned(self) -> None:
-        """
-        Sample 2 fix: Maintainability at 67% AND Efficiency at 82% must
-        both appear in the narrative, not just Maintainability.
-        """
         dims = DimensionScores(
             correctness=35.0,
-            efficiency_complexity=24.7,   # 82 % — actionable
+            efficiency_complexity=24.7,
             quality=20.0,
-            maintainability=10.0,         # 67 % — actionable
+            maintainability=10.0,
+            complexity_subscore=13.0,
+            efficiency_subscore=11.7,
         )
-        narrative = _generate_narrative(89.7, dims)
-        assert "Efficiency" in narrative
-        assert "Maintainability" in narrative
+        suggs = [self._Sugg("unused_vars", "low"), self._Sugg("loop_invariant", "medium")]
+        n = self._narrative(89.7, dims, complexity_class="O(n)", suggestions=suggs)
+        assert "Efficiency" in n
+        assert "Maintainability" in n
 
-    def test_two_bad_dims_efficiency_listed_first(self) -> None:
-        """
-        Efficiency missing 5.3 pts, Maintainability missing 5.0 pts.
-        Efficiency should appear before Maintainability (more pts missing).
-        """
+    def test_two_bad_dims_higher_missing_listed_first(self) -> None:
         dims = DimensionScores(
             correctness=35.0,
             efficiency_complexity=24.7,   # missing 5.3
             quality=20.0,
             maintainability=10.0,         # missing 5.0
+            complexity_subscore=13.0,
+            efficiency_subscore=11.7,
         )
-        narrative = _generate_narrative(89.7, dims)
-        eff_pos = narrative.find("Efficiency")
-        maint_pos = narrative.find("Maintainability")
-        assert eff_pos < maint_pos, (
-            "Efficiency (more points missing) must appear before Maintainability"
-        )
-
-    def test_single_bad_dim_only_that_dim_mentioned(self) -> None:
-        dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(80.0, dims)
-        assert "Maintainability" in narrative
+        suggs = [self._Sugg("unused_vars", "low")]
+        n = self._narrative(89.7, dims, complexity_class="O(n)", suggestions=suggs)
+        eff_pos = n.find("Efficiency")
+        maint_pos = n.find("Maintainability")
+        assert eff_pos < maint_pos
 
     def test_all_bad_dims_all_mentioned(self) -> None:
         dims = DimensionScores(
-            correctness=25.0,              # all below 90 %
+            correctness=25.0,
             efficiency_complexity=15.0,
             quality=8.0,
             maintainability=5.0,
+            complexity_subscore=6.0,
+            efficiency_subscore=9.0,
         )
-        narrative = _generate_narrative(53.0, dims)
-        assert "Correctness" in narrative
-        assert "Efficiency" in narrative
-        assert "Quality" in narrative
-        assert "Maintainability" in narrative
+        suggs = [
+            self._Sugg("loop_invariant", "high"),
+            self._Sugg("dead_code", "medium"),
+            self._Sugg("unused_vars", "low"),
+        ]
+        n = self._narrative(53.0, dims, complexity_class="O(n²)", suggestions=suggs)
+        assert "Correctness" in n
+        assert "Efficiency" in n
+        assert "Quality" in n
+        assert "Maintainability" in n
 
-    # ── Healthy but not perfect: gentle single note ───────────────────
+    # ── Healthy but not perfect: gentle note ─────────────────────────
 
     def test_all_healthy_not_perfect_gives_gentle_note(self) -> None:
-        """All dims ≥ 90 % but not 100 % → gentle 'squeeze out' tone."""
         dims = DimensionScores(
-            correctness=33.0,             # 94 % — healthy
-            efficiency_complexity=28.0,   # 93 % — healthy
-            quality=19.0,                 # 95 % — healthy
-            maintainability=14.0,         # 93 % — healthy
+            correctness=33.0,
+            efficiency_complexity=28.0,
+            quality=19.0,
+            maintainability=14.0,
+            complexity_subscore=13.0,
+            efficiency_subscore=15.0,
         )
-        narrative = _generate_narrative(94.0, dims)
-        assert "great shape" in narrative.lower() or "squeeze" in narrative.lower()
+        n = self._narrative(94.0, dims, complexity_class="O(n)", suggestions=[])
+        assert "great shape" in n.lower() or "squeeze" in n.lower()
 
     def test_all_healthy_not_perfect_no_alarm_language(self) -> None:
         dims = DimensionScores(
@@ -947,50 +1185,14 @@ class TestNarrativeGeneration:
             efficiency_complexity=28.0,
             quality=19.0,
             maintainability=14.0,
+            complexity_subscore=13.0,
+            efficiency_subscore=15.0,
         )
-        narrative = _generate_narrative(94.0, dims)
-        # Should not say "needs work" or "significant issues"
-        assert "needs some work" not in narrative.lower()
-        assert "significant issues" not in narrative.lower()
+        n = self._narrative(94.0, dims, complexity_class="O(n)", suggestions=[])
+        assert "needs some work" not in n.lower()
+        assert "significant issues" not in n.lower()
 
-    # ── Hint content covers all patterns (fix #4) ─────────────────────
-
-    def test_maintainability_hint_mentions_early_return(self) -> None:
-        dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(70.0, dims)
-        assert "early" in narrative.lower()
-
-    def test_maintainability_hint_mentions_constant_folding(self) -> None:
-        dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(70.0, dims)
-        assert "constant" in narrative.lower() or "pre-computed" in narrative.lower()
-
-    def test_maintainability_hint_mentions_unused_vars(self) -> None:
-        dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(70.0, dims)
-        assert "unused" in narrative.lower()
-
-    def test_maintainability_hint_mentions_nested_loops(self) -> None:
-        dims = self._dims_with_lowest("Maintainability")
-        narrative = _generate_narrative(70.0, dims)
-        assert "nested" in narrative.lower() or "loop" in narrative.lower()
-
-    def test_quality_hint_mentions_string_concat(self) -> None:
-        dims = self._dims_with_lowest("Quality")
-        narrative = _generate_narrative(65.0, dims)
-        assert "string" in narrative.lower() or "concat" in narrative.lower()
-
-    def test_quality_hint_mentions_dead_code(self) -> None:
-        dims = self._dims_with_lowest("Quality")
-        narrative = _generate_narrative(65.0, dims)
-        assert "dead" in narrative.lower()
-
-    def test_efficiency_hint_mentions_loop_invariant(self) -> None:
-        dims = self._dims_with_lowest("Efficiency & Complexity")
-        narrative = _generate_narrative(65.0, dims)
-        assert "invariant" in narrative.lower() or "loop" in narrative.lower()
-
-    # ── Partial-credit notes (fix #2) ────────────────────────────────
+    # ── Partial-credit notes ──────────────────────────────────────────
 
     def test_no_partial_note_when_all_data_present(self) -> None:
         dims = DimensionScores(
@@ -998,8 +1200,7 @@ class TestNarrativeGeneration:
             quality=20.0, maintainability=15.0,
             profiling_partial=False, optimizer_partial=False,
         )
-        narrative = _generate_narrative(95.0, dims)
-        assert "Note:" not in narrative
+        assert "Note:" not in self._narrative(95.0, dims)
 
     def test_profiling_partial_note_mentions_complexity(self) -> None:
         dims = DimensionScores(
@@ -1007,24 +1208,22 @@ class TestNarrativeGeneration:
             quality=20.0, maintainability=15.0,
             profiling_partial=True, optimizer_partial=False,
         )
-        narrative = _generate_narrative(85.0, dims)
-        assert "Note:" in narrative
-        assert "Complexity" in narrative
-        assert "Efficiency sub-score" not in narrative or "Complexity sub-score only" in narrative
+        n = self._narrative(85.0, dims)
+        assert "Note:" in n
+        assert "Complexity" in n
+        assert "Efficiency sub-score" not in n or "Complexity sub-score only" in n
 
-    def test_optimizer_partial_note_mentions_efficiency_quality_maintainability(
-        self,
-    ) -> None:
+    def test_optimizer_partial_note_mentions_all_three(self) -> None:
         dims = DimensionScores(
             correctness=35.0, efficiency_complexity=21.0,
             quality=10.0, maintainability=7.0,
             profiling_partial=False, optimizer_partial=True,
         )
-        narrative = _generate_narrative(73.0, dims)
-        assert "Note:" in narrative
-        assert "Efficiency" in narrative
-        assert "Quality" in narrative
-        assert "Maintainability" in narrative
+        n = self._narrative(73.0, dims)
+        assert "Note:" in n
+        assert "Efficiency" in n
+        assert "Quality" in n
+        assert "Maintainability" in n
 
     def test_both_partial_note_mentions_all_four(self) -> None:
         dims = DimensionScores(
@@ -1032,12 +1231,67 @@ class TestNarrativeGeneration:
             quality=10.0, maintainability=7.0,
             profiling_partial=True, optimizer_partial=True,
         )
-        narrative = _generate_narrative(67.0, dims)
-        assert "Note:" in narrative
-        assert "Complexity" in narrative
-        assert "Efficiency" in narrative
-        assert "Quality" in narrative
-        assert "Maintainability" in narrative
+        n = self._narrative(67.0, dims)
+        assert "Note:" in n
+        assert "Complexity" in n
+        assert "Efficiency" in n
+        assert "Quality" in n
+        assert "Maintainability" in n
+
+
+# ---------------------------------------------------------------------------
+# 11b. _build_dimension_hint — dynamic hint specificity
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDimensionHint:
+    """_build_dimension_hint must mention only detected issues."""
+
+    @dataclass
+    class _S:
+        pattern: str
+        severity: str
+
+    def test_correctness_hint_always_same(self) -> None:
+        h = _build_dimension_hint("Correctness", "O(n)", 13.0, [])
+        assert "error" in h.lower()
+
+    def test_efficiency_no_issues_generic_encouragement(self) -> None:
+        """complexity=15 (perfect), no suggestions → no alarm, just encouragement."""
+        h = _build_dimension_hint("Efficiency & Complexity", "O(1)", 15.0, [])
+        assert "good" in h.lower() or "keep" in h.lower()
+
+    def test_efficiency_complexity_class_surfaced(self) -> None:
+        h = _build_dimension_hint("Efficiency & Complexity", "O(n²)", 6.0, [])
+        assert "quadratic" in h.lower() or "O(n²)" in h or "nested" in h.lower()
+
+    def test_efficiency_suggestion_surfaced(self) -> None:
+        suggs = [self._S("loop_invariant", "medium")]
+        h = _build_dimension_hint("Efficiency & Complexity", "O(n)", 13.0, suggs)
+        assert "invariant" in h.lower() or "never changes" in h.lower()
+
+    def test_efficiency_no_nested_loop_when_not_in_suggestions(self) -> None:
+        """nested_loops is a MAINTAINABILITY pattern — must never appear in efficiency hint."""
+        h = _build_dimension_hint("Efficiency & Complexity", "O(n)", 13.0, [])
+        assert "nested loop" not in h.lower()
+
+    def test_quality_only_detected_patterns(self) -> None:
+        suggs = [self._S("dead_code", "medium")]
+        h = _build_dimension_hint("Quality", "O(n)", 13.0, suggs)
+        assert "dead" in h.lower() or "never execute" in h.lower()
+        assert "string" not in h.lower()   # string_concat_loop not in suggestions
+
+    def test_maintainability_only_detected_patterns(self) -> None:
+        suggs = [self._S("unused_vars", "low")]
+        h = _build_dimension_hint("Maintainability", "O(n)", 13.0, suggs)
+        assert "never used" in h.lower() or "assigned but never" in h.lower()
+        assert "nested" not in h.lower()   # nested_loops not in suggestions
+        assert "early" not in h.lower()    # early_return not in suggestions
+
+    def test_unknown_pattern_does_not_crash(self) -> None:
+        suggs = [self._S("brand_new_pattern", "low")]
+        h = _build_dimension_hint("Quality", "O(n)", 13.0, suggs)
+        assert isinstance(h, str)
 
 
 # ---------------------------------------------------------------------------

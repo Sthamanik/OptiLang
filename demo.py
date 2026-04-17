@@ -298,7 +298,7 @@ def sum_range(n):
         total += i
     return total
 
-unused = 999
+unused_var = 999
 result = sum_range(100)
 print(result)
 """
