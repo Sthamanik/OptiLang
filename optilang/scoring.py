@@ -6,13 +6,13 @@ Scoring system for OptiLang.
 Calculates an overall optimization score (0–100) across four dimensions:
 
     Dimension               Max     Source
-    ─────────────────────────────────────────────────────────────────
+    ────────────────────────────
     Correctness              35     result.errors
     Efficiency + Complexity  30     complexity: Big-O class (15)
                                     efficiency: optimizer patterns (15)
     Quality                  20     optimizer suggestions (runtime patterns)
     Maintainability          15     optimizer suggestions (style patterns)
-    ─────────────────────────────────────────────────────────────────
+    ────────────────────────────
     Total                   100
 
 Design principles:
@@ -30,18 +30,22 @@ Design principles:
 Dimension breakdown:
 
     Correctness (0–35)
-        Derived directly from result.errors.
-        Smooth scale: 35 / 25 / 15 / 5 / 0 for 0 / 1 / 2 / 3 / 4+ errors.
-        Distributes the penalty proportionally instead of the old harsh
-        35 → 10 → 0 cliff.
+        Uses error density = errors / source_lines, fed through the same
+        linear-interpolated density-to-score function as Quality and
+        Maintainability. A 100-line program with 4 errors (density 0.04)
+        is judged far more leniently than a 5-line program with 3 errors
+        (density 0.60). Zero errors always yields full marks (35.0).
 
     Efficiency + Complexity (0–30), two independent sub-scores:
 
         Complexity sub-score (0–15)
-            Reuses the _detect_complexity() heuristic which reads execution
-            counts from profiling.line_stats and returns a Big-O class string.
-            That string is mapped to fixed points (same as before).
-            Measures HOW THE PROGRAM SCALES as input grows.
+            Coverage-weighted: base_points × hot_coverage +
+                               15.0 × (1 - hot_coverage)
+            where hot_coverage = hot_lines / total_lines and hot_lines are
+            those executing more than sqrt(max_count) times.
+            A tiny quadratic loop in a 200-line program barely dents the
+            score; a program that is quadratic wall-to-wall pays the full
+            penalty. O(1) and O(log n) always return 15.0.
             Requires profiling data; falls back to PARTIAL_COMPLEXITY (7.0).
 
         Efficiency sub-score (0–15)
@@ -402,6 +406,71 @@ def _density_to_score(density: float, max_score: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _coverage_weighted_complexity(
+    complexity_class: str,
+    line_stats: Dict[str, Any],
+) -> float:
+    """
+    Return a complexity sub-score (0–15) that accounts for how much of
+    the program is actually affected by the detected complexity class.
+
+    Problem with a fixed lookup:
+        COMPLEXITY_POINTS["O(n²)"] = 6.0 regardless of whether 2 lines
+        or 200 lines are inside the quadratic hot path. A tiny nested loop
+        in a 500-line program should not be penalised as harshly as a
+        program that is quadratic from top to bottom.
+
+    Algorithm:
+        1. Start with the base points for the complexity class (same table
+           as before — this represents the worst-case penalty for that class).
+        2. Compute hot_coverage = hot_lines / total_lines, where hot_lines
+           are those executing more than sqrt(max_count) times. This is a
+           proxy for "what fraction of the program is inside the hot path".
+        3. Blend: score = full_marks × (1 - hot_coverage) +
+                          base_points × hot_coverage
+           When hot_coverage → 0 (tiny hot path): score → full_marks (15).
+           When hot_coverage → 1 (entire program is hot): score → base_points.
+
+    This means:
+        - A 200-line program with 2 quadratic lines → hot_coverage ≈ 0.01
+          → score ≈ 14.9  (almost perfect, the problem is tiny)
+        - A 5-line program where all lines are quadratic → hot_coverage ≈ 1.0
+          → score ≈ 6.0   (full O(n²) penalty)
+        - O(1) and O(log n) always return 15.0 regardless of coverage
+          (no penalty to apply).
+
+    Args:
+        complexity_class: Big-O class string from _detect_complexity().
+        line_stats:       Profiling line_stats dict.
+
+    Returns:
+        Complexity sub-score in [0.0, 15.0].
+    """
+    base = COMPLEXITY_POINTS.get(complexity_class, PARTIAL_COMPLEXITY)
+
+    # Perfect classes — no penalty possible, skip coverage calculation
+    if base >= 15.0:
+        return 15.0
+
+    counts = [int(s.get("count", 0)) for s in line_stats.values()]
+    total_lines = len(counts)
+    if total_lines == 0:
+        return base
+
+    max_count = max(counts) if counts else 0
+    if max_count == 0:
+        return 15.0
+
+    # Lines executing more than sqrt(max_count) times are "in the hot path"
+    threshold = math.sqrt(max_count)
+    hot_lines = sum(1 for c in counts if c > threshold)
+    hot_coverage = hot_lines / total_lines  # 0.0 … 1.0
+
+    # Blend between full marks (no hot path) and base penalty (all hot)
+    score = 15.0 * (1.0 - hot_coverage) + base * hot_coverage
+    return round(max(0.0, min(15.0, score)), 2)
+
+
 class Scorer:
     """
     Calculates a four-dimension optimization score (0–100).
@@ -474,10 +543,10 @@ class Scorer:
         """
         dims = DimensionScores()
 
-        # ── Correctness ───────────────────────────────────────────────
+        # ── Correctness ───────────────────────
         dims.correctness = self._score_correctness()
 
-        # ── Efficiency + Complexity ───────────────────────────────────
+        # ── Efficiency + Complexity ───────────────────
         # Returns five values: class string, two sub-scores, and two
         # separate partial-credit flags — one per data source.
         complexity_class, c_sub, e_sub, profiling_partial, optimizer_partial_eff = (
@@ -488,11 +557,11 @@ class Scorer:
         dims.efficiency_complexity = c_sub + e_sub
         dims.profiling_partial = profiling_partial
 
-        # ── Quality ───────────────────────────────────────────────────
+        # ── Quality ─────────────────────────
         q_score, optimizer_partial_quality = self._score_quality()
         dims.quality = q_score
 
-        # ── Maintainability ───────────────────────────────────────────
+        # ── Maintainability ──────────────────────
         dims.maintainability = self._score_maintainability()
 
         # optimizer_partial is True if ANY optimizer-dependent sub-score
@@ -500,7 +569,7 @@ class Scorer:
         # maintainability all require the optimizer to have run.
         dims.optimizer_partial = optimizer_partial_eff or optimizer_partial_quality
 
-        # ── Final score ───────────────────────────────────────────────
+        # ── Final score ───────────────────────
         total = (
             dims.correctness
             + dims.efficiency_complexity
@@ -510,7 +579,19 @@ class Scorer:
         final = max(0.0, min(100.0, total))
 
         grade = _assign_grade(final)
-        narrative = _generate_narrative(final, dims)
+
+        # Collect all suggestions for dynamic narrative hint building
+        all_suggestions: List[Any] = (
+            list(getattr(self._optimizer, "suggestions", []))
+            if self._optimizer is not None
+            else []
+        )
+        narrative = _generate_narrative(
+            final,
+            dims,
+            complexity_class=complexity_class,
+            all_suggestions=all_suggestions,
+        )
 
         # CV is kept for diagnostic/informational output only
         cv = self._compute_cv()
@@ -533,25 +614,30 @@ class Scorer:
 
     def _score_correctness(self) -> float:
         """
-        Correctness (0–35) derived directly from result.errors.
+        Correctness (0–35) based on error density relative to program size.
 
-        Smooth scale — eliminates the previous 25-point cliff for one error:
-            0 errors  → 35.0
-            1 error   → 25.0
-            2 errors  → 15.0
-            3 errors  →  5.0
-            4+ errors →  0.0
+        Uses error density = errors / source_lines, fed through the same
+        linear-interpolated density-to-score function as all other dimensions.
+        This means a 100-line program with 4 errors (density 0.04) is judged
+        far more leniently than a 5-line program with 3 errors (density 0.60),
+        which is the correct behaviour — proportional impact matters.
+
+        Special case: zero errors always yields full marks (35.0) regardless
+        of program size.
+
+        Density anchors (shared with _density_to_score):
+            0.00  → 35.0  (no errors)
+            0.30  → 28.0  (sparse errors  — 80 %)
+            0.60  → 21.0  (moderate errors — 60 %)
+            1.00  → 12.25 (heavy errors    — 35 %)
+            2.00+ →  3.5  (critical        — 10 %, clamped)
         """
         n = len(self._errors)
         if n == 0:
-            return 35.0
-        if n == 1:
-            return 25.0
-        if n == 2:
-            return 15.0
-        if n == 3:
-            return 5.0
-        return 0.0
+            return MAX_CORRECTNESS
+
+        density = n / self._source_lines
+        return _density_to_score(density, MAX_CORRECTNESS)
 
     def _score_efficiency_complexity(
         self,
@@ -582,7 +668,7 @@ class Scorer:
             profiling_partial = True
         else:
             complexity_class = _detect_complexity(self._line_stats)
-            c_sub = COMPLEXITY_POINTS.get(complexity_class, PARTIAL_COMPLEXITY)
+            c_sub = _coverage_weighted_complexity(complexity_class, self._line_stats)
             profiling_partial = False
 
         # Efficiency sub-score — requires optimizer data
@@ -751,61 +837,195 @@ def _rank_dimensions(dims: DimensionScores) -> List[Tuple[str, float, float]]:
 _PERFECT_RATIO: float = 1.0  # exactly full marks
 _HEALTHY_RATIO: float = 0.90  # within 10 % of full marks → no complaint
 
+# ---------------------------------------------------------------------------
+# Pattern → human-readable label (used in dynamic hints)
+# ---------------------------------------------------------------------------
 
-def _generate_narrative(score: float, dims: DimensionScores) -> str:
+_PATTERN_LABELS: Dict[str, str] = {
+    # Efficiency patterns
+    "hot_loop": "a loop that dominates execution time",
+    "loop_invariant": (
+        "a computation inside a loop whose value never changes between iterations"
+    ),
+    "repeated_computation": (
+        "the same expression computed more than once unnecessarily"
+    ),
+    "expensive_calls": "a slow function called repeatedly inside a loop",
+    # Quality patterns
+    "dead_code": "code that can never execute",
+    "string_concat_loop": (
+        "string concatenation with += inside a loop (creates O(n²) copies)"
+    ),
+    # Maintainability patterns
+    "unused_vars": "a variable that is assigned but never used",
+    "early_return": "a function that could return early to reduce nesting",
+    "nested_loops": "a loop nested inside another loop",
+    "constant_folding": (
+        "a literal expression that could be pre-computed (e.g. '3 * 4' → '12')"
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Complexity class → plain-English explanation (used when complexity sub-score
+# is the reason Efficiency & Complexity is below full marks)
+# ---------------------------------------------------------------------------
+
+_COMPLEXITY_EXPLANATIONS: Dict[str, str | None] = {
+    "O(1)": None,  # perfect — no explanation needed
+    "O(log n)": None,  # perfect — no explanation needed
+    "O(n)": (
+        "linear time (O(n)) — acceptable for most programs, "
+        "but watch for unnecessary work inside the loop"
+    ),
+    "O(n log n)": (
+        "O(n log n) time — typical of sorting algorithms; "
+        "consider whether this is necessary"
+    ),
+    "O(n²)": (
+        "quadratic time (O(n²)) — often caused by a loop nested inside "
+        "another loop; consider restructuring"
+    ),
+    "O(n³)": (
+        "cubic time (O(n³)) — caused by deeply nested loops; "
+        "this will become very slow as input grows"
+    ),
+    "O(n^k)": (
+        "polynomial time — caused by deeply nested loops; "
+        "consider a more efficient algorithm"
+    ),
+    "O(2^n)": (
+        "exponential time (O(2^n)) — this will be impractically slow "
+        "for any non-trivial input; consider dynamic programming or memoization"
+    ),
+    "Unknown": None,  # no profiling data — nothing specific to say
+}
+
+
+def _build_dimension_hint(
+    name: str,
+    complexity_class: str,
+    complexity_subscore: float,
+    suggestions: List[Any],
+) -> str:
     """
-    Generate a clear, honest, beginner-friendly narrative.
+    Build a specific hint for one dimension based on what was actually found.
 
-    Logic:
-        1. If every dimension is at 100 % → pure congratulation, no false
-           "weakest area" named.
-        2. Otherwise collect every dimension whose ratio < _HEALTHY_RATIO,
-           ranked by most absolute points missing. All of them are mentioned
-           with their hint so nothing genuinely important is silently dropped.
-        3. If all dimensions are healthy (≥ 90 %) but not all perfect,
-           name only the single most-improvable one as a minor note.
-        4. Append an accurate partial-credit note when data was unavailable.
+    For Correctness: always the same (fix your errors).
+    For Efficiency & Complexity: combines complexity class explanation (if
+        complexity sub-score < 15) with the actual efficiency suggestions found.
+    For Quality and Maintainability: lists only the optimizer suggestions that
+        belong to that dimension — no generic laundry list of everything possible.
 
-    This fixes two bugs in the previous version:
-        - A perfect program was told "your weakest area is Correctness"
-          because _lowest_dimension always returned something.
-        - Only one dimension was ever named, hiding important secondary
-          weaknesses (e.g. Efficiency at 82 % alongside Maintainability
-          at 66 % — both need attention but only the latter was shown).
+    Args:
+        name:               Dimension name.
+        complexity_class:   Detected Big-O class string (from ScoreReport).
+        complexity_subscore: Complexity sub-score (0–15).
+        suggestions:        All optimizer suggestions for this dimension only.
+
+    Returns:
+        A concise, specific hint string.
     """
-    hints: Dict[str, str] = {
-        "Correctness": (
-            "Focus on fixing the errors in your program first. "
-            "A program that runs without errors is the foundation of "
-            "everything else."
-        ),
-        "Efficiency & Complexity": (
-            "Review both how your program scales and whether it avoids "
-            "unnecessary work. Nested loops raise algorithmic complexity. "
-            "Loop-invariant computations, repeated expressions, hot loops, "
-            "and expensive repeated function calls waste work within each "
-            "iteration. Improving either the complexity class or the "
-            "wasted-work issues will raise this score."
-        ),
+    if name == "Correctness":
+        return (
+            "Fix the errors in your program first. "
+            "A program that runs without errors is the foundation of everything else."
+        )
+
+    if name == "Efficiency & Complexity":
+        parts: List[str] = []
+
+        # Complexity part — only if complexity is not perfect
+        if complexity_subscore < 15.0:
+            explanation = _COMPLEXITY_EXPLANATIONS.get(complexity_class)
+            if explanation:
+                parts.append(f"Your program runs in {explanation}.")
+
+        # Efficiency part — only the patterns actually detected
+        if suggestions:
+            pattern_lines = []
+            for s in suggestions:
+                label = _PATTERN_LABELS.get(s.pattern)
+                if label:
+                    pattern_lines.append(f"• {label.capitalize()}.")
+            if pattern_lines:
+                parts.append(
+                    "The optimizer found the following issues:\n"
+                    + "\n".join(pattern_lines)
+                )
+
+        if not parts:
+            # complexity is perfect (15/15) and no efficiency suggestions —
+            # this dimension is close to perfect, give generic encouragement
+            return (
+                "Your algorithmic complexity looks good. "
+                "Keep an eye on loop-invariant computations and repeated "
+                "expressions as your programs grow."
+            )
+
+        return " ".join(parts)
+
+    # Quality and Maintainability — list only what was actually found
+    if suggestions:
+        pattern_lines = []
+        for s in suggestions:
+            label = _PATTERN_LABELS.get(s.pattern)
+            if label:
+                pattern_lines.append(f"• {label.capitalize()}.")
+        if pattern_lines:
+            return "The optimizer found the following issues:\n" + "\n".join(
+                pattern_lines
+            )
+
+    # Fallback: dimension scored below healthy but no specific suggestions
+    # (can happen with partial credit or rounding)
+    fallback: Dict[str, str] = {
         "Quality": (
-            "Review the runtime suggestions — particularly string "
-            "concatenation inside loops (which creates O(n²) string copies) "
-            "and dead code that can never execute. Eliminating these directly "
-            "improves how your program behaves at runtime."
+            "Review your program for dead code that can never execute "
+            "and string concatenation with += inside loops."
         ),
         "Maintainability": (
-            "Look for: unused variables that were assigned but never read; "
-            "literal expressions that could be replaced with a pre-computed "
-            "constant (e.g. '3 * 4' → '12'); opportunities to return early "
-            "from functions rather than deeply nesting the main logic; and "
-            "loops nested inside other loops. Cleaner structure makes code "
-            "easier to reason about and often reveals further optimizations."
+            "Review your program for unused variables, expressions that "
+            "could be pre-computed, opportunities to return early from "
+            "functions, and loops nested inside other loops."
         ),
     }
+    return fallback.get(name, "Review the optimizer suggestions for this dimension.")
+
+
+def _generate_narrative(
+    score: float,
+    dims: DimensionScores,
+    complexity_class: str = "Unknown",
+    all_suggestions: Optional[List[Any]] = None,
+) -> str:
+    """
+    Generate a clear, honest, specific, beginner-friendly narrative.
+
+    Logic:
+        1. If every dimension is at 100 % → pure congratulation.
+        2. Otherwise collect every dimension whose ratio < _HEALTHY_RATIO,
+           ranked by most absolute points missing. All of them are mentioned
+           with a SPECIFIC hint based on what was actually found — not a
+           generic laundry list of every possible issue.
+        3. If all dimensions are healthy (≥ 90 %) but not all perfect,
+           give a gentle note on the single most-improvable dimension.
+        4. Append an accurate partial-credit note when data was unavailable.
+
+    Args:
+        score:            Final score (0–100).
+        dims:             DimensionScores from Scorer.calculate().
+        complexity_class: Detected Big-O class (e.g. "O(n)").
+        all_suggestions:  All optimizer suggestions (used to build specific hints).
+    """
+    all_suggestions = all_suggestions or []
+
+    # Pre-partition suggestions by dimension so each hint only sees its own
+    efficiency_suggs = [s for s in all_suggestions if s.pattern in EFFICIENCY_PATTERNS]
+    quality_suggs = [s for s in all_suggestions if s.pattern in QUALITY_PATTERNS]
+    maint_suggs = [s for s in all_suggestions if s.pattern in MAINTAINABILITY_PATTERNS]
 
     ranked = _rank_dimensions(dims)
 
-    # Separate into actionable (meaningfully below perfect) and healthy
     actionable = [
         (name, ratio, missing)
         for name, ratio, missing in ranked
@@ -818,10 +1038,21 @@ def _generate_narrative(score: float, dims: DimensionScores) -> str:
     ]
     all_perfect = all(ratio >= _PERFECT_RATIO for _, ratio, _ in ranked)
 
-    # ── Partial-credit note ───────────────────────────────────────────
-    # profiling_partial → only the Complexity sub-score was affected.
-    # optimizer_partial → Efficiency sub-score, Quality, and Maintainability
-    #                     were all affected (all three require the optimizer).
+    def _hint_for(name: str) -> str:
+        suggs_map = {
+            "Efficiency & Complexity": efficiency_suggs,
+            "Quality": quality_suggs,
+            "Maintainability": maint_suggs,
+            "Correctness": [],
+        }
+        return _build_dimension_hint(
+            name,
+            complexity_class,
+            dims.complexity_subscore,
+            suggs_map.get(name, []),
+        )
+
+    # ── Partial-credit note ──────────────────────
     partial_note = ""
     if dims.profiling_partial and dims.optimizer_partial:
         partial_note = (
@@ -845,7 +1076,7 @@ def _generate_narrative(score: float, dims: DimensionScores) -> str:
             "from profiling data."
         )
 
-    # ── Grade headline ────────────────────────────────────────────────
+    # ── Grade headline ────────────────────────
     if score >= 90:
         headline = (
             "Excellent work! Your program is correct, efficient, and "
@@ -863,7 +1094,7 @@ def _generate_narrative(score: float, dims: DimensionScores) -> str:
     else:
         headline = "Your program has significant issues that need to be resolved. "
 
-    # ── Body ──────────────────────────────────────────────────────────
+    # ── Body ───────────────────────
 
     # Case 1: truly perfect — no improvement advice needed
     if all_perfect:
@@ -877,20 +1108,20 @@ def _generate_narrative(score: float, dims: DimensionScores) -> str:
     elif actionable:
         if len(actionable) == 1:
             name, _, _ = actionable[0]
-            body = f"Your main area to improve is {name}. " f"{hints[name]}"
+            body = f"Your main area to improve is {name}. " f"{_hint_for(name)}"
         else:
-            # Build a numbered list so priority is crystal clear
             items = []
             for i, (name, ratio, missing) in enumerate(actionable, 1):
                 pct = round((1.0 - ratio) * 100)
-                items.append(f"{i}. {name} ({pct}% below full marks) — {hints[name]}")
+                items.append(
+                    f"{i}. {name} ({pct}% below full marks) — {_hint_for(name)}"
+                )
             body = (
                 "Multiple areas need attention, listed from most to least "
                 "impactful:\n" + "\n".join(items)
             )
 
-    # Case 3: all dimensions are healthy (≥ 90 %) but not all perfect —
-    # give a gentle note on the single most-improvable dimension
+    # Case 3: all healthy but not all perfect — gentle single note
     else:
         name, ratio, missing = near_perfect[0] if near_perfect else ranked[0]
         pct = round((1.0 - ratio) * 100)
@@ -898,7 +1129,7 @@ def _generate_narrative(score: float, dims: DimensionScores) -> str:
             f"Your program is in great shape. "
             f"If you want to squeeze out the last few points, "
             f"{name} is {pct}% below full marks. "
-            f"{hints[name]}"
+            f"{_hint_for(name)}"
         )
 
     return headline + body + partial_note
