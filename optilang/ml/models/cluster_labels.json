@@ -1,0 +1,9 @@
+{
+  "0": "hoist_invariant",
+  "1": "cache_repeated_computation",
+  "2": "cleanup_dead_unused_code",
+  "3": "cache_repeated_computation_satellite",
+  "4": "reduce_nesting",
+  "5": "memoize_expensive_calls",
+  "6": "replace_string_concat"
+}
