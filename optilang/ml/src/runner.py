@@ -19,9 +19,38 @@ from .storage import (
     EXECUTION_FIELDNAMES,
     EXECUTIONS_CSV,
     RAW_DIR,
-    write_csv,
+    append_executions,
 )
 
+
+# ---------------------------------------------------------------------------
+# Family-level metadata tables
+# ---------------------------------------------------------------------------
+
+# The dominant fix strategy for each program family.
+# Used as a coarse label for the classify stage.
+_FAMILY_STRATEGY: Dict[str, str] = {
+    "simple":        "fold_and_prune",       # constant folding + unused var removal
+    "loops":         "restructure_loop",     # hoist invariants, flatten nested loops
+    "recursive":     "no_action",            # recursive programs rarely get loop opts
+    "mixed":         "mixed",                # multiple strategies apply
+    "pathological":  "aggressive_prune",     # dead code + unused vars at scale
+}
+
+# Pipe-separated patterns expected to appear in each family.
+# Drives the expected_patterns column — ground truth for EDA / eval.
+_FAMILY_EXPECTED_PATTERNS: Dict[str, str] = {
+    "simple":        "constant_folding|unused_vars",
+    "loops":         "nested_loops|loop_invariant|unused_vars",
+    "recursive":     "unused_vars",
+    "mixed":         "constant_folding|unused_vars|nested_loops|repeated_computation",
+    "pathological":  "dead_code|unused_vars|repeated_computation|hot_loop",
+}
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _source_line_count(source: str) -> int:
     return len(source.splitlines()) if source else 0
@@ -31,6 +60,29 @@ def _collect_sources(raw_dir: Path) -> List[Path]:
     """Recursively collect all .py files under raw_dir."""
     return sorted(raw_dir.rglob("*.py"))
 
+
+def _build_manifest_row(source_path: Path) -> Dict[str, str]:
+    """Derive manifest metadata from file path and name."""
+    stem = source_path.stem                       # e.g. bubble_sort_v1
+    parts = stem.rsplit("_v", 1)
+    program_id = parts[0]                         # e.g. bubble_sort
+    variant = f"v{parts[1]}" if len(parts) == 2 else "v1"
+    family = source_path.parent.name              # simple / loops / recursive / mixed / pathological
+
+    return {
+        "program_id":        program_id,
+        "variant":           variant,
+        "family":            family,
+        "strategy":          _FAMILY_STRATEGY.get(family, "unknown"),
+        "patterns":          _FAMILY_EXPECTED_PATTERNS.get(family, ""),
+        "pathological":      str(family == "pathological"),
+        "source_path":       str(source_path),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
 
 def run_one(
     source_path: Path,
@@ -59,13 +111,15 @@ def run_one(
         errors=result.errors,
     )
 
+    manifest_row = _build_manifest_row(source_path)
+
     return extract(
         source=source,
         result=result,
         report=report,
         score=score,
+        manifest_row=manifest_row,
         execution_id=execution_id,
-        source_path=source_path,
         ast=ast,
     )
 
@@ -138,7 +192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         timeout_seconds=args.timeout,
     )
 
-    count = write_csv(EXECUTIONS_CSV, rows, EXECUTION_FIELDNAMES)
+    count = append_executions(rows)
     print(f"\nWrote {count} suggestion rows → {EXECUTIONS_CSV}")
     return 0
 

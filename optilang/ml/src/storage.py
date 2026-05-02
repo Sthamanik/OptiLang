@@ -4,35 +4,44 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List
 
 
 ML_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ML_DIR / "data"
+RAW_DIR = DATA_DIR / "raw"
 EXECUTIONS_CSV = DATA_DIR / "executions.csv"
 
 
 EXECUTION_FIELDNAMES: List[str] = [
+    # --- Identifiers / ground truth ---
     "execution_id",
-    "program_id",
-    "variant",
     "family",
     "strategy",
-    "expected_patterns",
+    # --- Core suggestion features ---
     "pattern",
     "severity",
     "impact_score",
-    "line_number",
+    # --- Structural (AST) ---
     "loop_depth",
     "is_inside_loop",
+    "relative_line_position",
     "co_occurring_patterns",
+    # --- Dynamic — line level ---
+    "execution_count_at_line",
+    "avg_time_ms_at_line",
+    "total_time_ms_at_line",
+    "line_dominance",
+    # --- Dynamic — function level ---
+    "function_call_count",
+    "max_recursion_depth",
+    # --- Program-level context ---
     "source_lines",
     "complexity_class",
-    "error_count",
+    "complexity_ordinal",
     "execution_time_ms",
+    "peak_memory_bytes",
     "total_suggestions",
-    "score",
-    "grade",
 ]
 
 
@@ -43,7 +52,7 @@ def ensure_data_dirs() -> None:
 
 def append_executions(rows: Iterable[Dict[str, object]]) -> int:
     """Append suggestion-level rows to executions.csv.
-    
+
     Writes the header only when the file is new or empty.
     Returns the number of rows written.
     """
@@ -66,7 +75,7 @@ def append_executions(rows: Iterable[Dict[str, object]]) -> int:
 
 def read_executions() -> List[Dict[str, str]]:
     """Read all rows from executions.csv.
-    
+
     Returns an empty list if the file does not exist yet.
     """
     if not EXECUTIONS_CSV.exists():

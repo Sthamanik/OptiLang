@@ -22,37 +22,16 @@ def _source_line_count(source: str) -> int:
 
 
 def _profiling_time_ms(result: ExecutionResult) -> float:
-    """
-    Return execution time in milliseconds.
-
-    Prefers result.profiling when available. Falls back to result.execution_time
-    and logs a warning so the caller is aware the value is less precise.
-    """
     if result.profiling is not None:
         return result.profiling.total_execution_time_ms
-
-    logger.warning(
-        "profiling data unavailable — falling back to result.execution_time"
-    )
+    logger.warning("profiling unavailable — falling back to result.execution_time")
     return result.execution_time * 1000.0
-
-
-def _resolve_status(result: ExecutionResult, report: Optional[OptimizationReport]) -> str:
-    if result.errors:
-        return "error"
-    if report is None:
-        return "analysis_unavailable"
-    return "ok"
 
 
 def _loop_context(ast: Optional[ProgramNode]) -> Dict[int, Tuple[int, bool]]:
     """
-    Walk the AST and map each source line to (loop_depth, is_inside_loop).
-
-    loop_depth=0 means the line is at top level (not inside any loop).
-    loop_depth=1 means directly inside one loop, and so on.
-    When a line appears under multiple nodes (e.g. shared line numbers),
-    the maximum depth seen is kept.
+    Walk AST and map each source line to (loop_depth, is_inside_loop).
+    loop_depth=0 means top level. Keeps maximum depth when lines overlap.
     """
     context: Dict[int, Tuple[int, bool]] = {}
     if ast is None:
@@ -83,12 +62,30 @@ def _loop_context(ast: Optional[ProgramNode]) -> Dict[int, Tuple[int, bool]]:
     return context
 
 
-def _manifest_field(manifest_row: Dict[str, str], key: str) -> str:
-    """Safely retrieve a manifest field, warning when absent."""
-    value = manifest_row.get(key, "")
+def _get(manifest_row: Dict[str, str], key: str, default: str = "") -> str:
+    """Safely retrieve a manifest field with optional default."""
+    value = manifest_row.get(key, default)
     if not value:
-        logger.warning("manifest row missing expected field: '%s'", key)
+        logger.debug("manifest missing field '%s' — using default '%s'", key, default)
     return value
+
+
+_COMPLEXITY_ORDINAL: Dict[str, int] = {
+    "O(1)":              1,
+    "O(log n)":          2,
+    "O(n)":              3,
+    "O(n log n)":        4,
+    "O(n^2)":            5,
+    "O(n²)":             5,   # unicode superscript variant from scorer
+    "O(n^k)":            5,   # generic polynomial — treat as n^2 tier
+    "O(n^3) or worse":   6,
+    "O(n³)":             6,   # unicode superscript variant from scorer
+    "O(2^n)":            7,
+}
+
+
+def _complexity_ordinal(complexity_class: str) -> int:
+    return _COMPLEXITY_ORDINAL.get(complexity_class, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -105,66 +102,126 @@ def extract(
     ast: Optional[ProgramNode] = None,
 ) -> List[Dict[str, object]]:
     """
-    Convert one pipeline run into a list of flat suggestion rows for executions.csv.
+    Convert one pipeline run into flat suggestion rows for executions.csv.
 
-    Each row is one suggestion combined with its execution-level context.
-    Returns an empty list when the report has no suggestions.
+    Skips runs with errors — errored programs carry no useful ML signal.
+    Returns empty list when errors exist or no suggestions are found.
 
     Parameters
     ----------
-    source:         Raw source string of the program that was executed.
-    result:         ExecutionResult from the interpreter pipeline.
-    report:         OptimizationReport produced by the analyzer. May be None.
-    score:          ScoreReport from the scoring stage.
-    manifest_row:   Dict of metadata from the program manifest (program_id, variant, etc.).
-    execution_id:   Unique ID for this execution run (caller is responsible for generating).
-    ast:            Parsed AST root node. Used for loop depth resolution. May be None.
+    source          Raw source string of the executed program.
+    result          ExecutionResult from interpreter pipeline.
+    report          OptimizationReport from analyzer. May be None.
+    score           ScoreReport from scoring stage.
+    manifest_row    Metadata dict — family, strategy, etc.
+    execution_id    UUID string for this run.
+    ast             Parsed AST root. Used for loop depth resolution. May be None.
     """
-    suggestions = list(report.suggestions) if report is not None else []
+    if result.errors:
+        logger.debug(
+            "skipping errored execution for program_id=%s",
+            manifest_row.get("program_id"),
+        )
+        return []
 
-    # Execution-level scalars — computed once, shared across all suggestion rows
-    source_lines = _source_line_count(source)
+    raw_suggestions = list(report.suggestions) if report is not None else []
+
+    # Deduplicate by (pattern, line) — the constant_folding detector can
+    # visit the same AST node multiple times via different walk paths,
+    # producing identical rows that would corrupt training data.
+    seen_keys: set = set()
+    suggestions = []
+    for s in raw_suggestions:
+        key = (s.pattern, s.line)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            suggestions.append(s)
+
+    if not suggestions:
+        return []
+
+    source_lines      = _source_line_count(source)
     execution_time_ms = _profiling_time_ms(result)
-    error_count = len(result.errors)
     total_suggestions = len(suggestions)
-    status = _resolve_status(result, report)
-    co_occurring_patterns = "|".join(sorted({s.pattern for s in suggestions}))
-    loop_context = _loop_context(ast)
+    co_occurring      = "|".join(sorted({s.pattern for s in suggestions}))
+    loop_context      = _loop_context(ast)
 
-    # Shared execution context embedded in every suggestion row
-    execution_context: Dict[str, object] = {
+    # --- Program-level profiling ---
+    profiling            = result.profiling
+    total_lines_executed = profiling.total_lines_executed if profiling else 0
+    peak_memory_bytes    = profiling.peak_memory_bytes if profiling else 0
+
+    program_context: Dict[str, object] = {
+        # Identifiers / ground truth
         "execution_id":       execution_id,
-        "program_id":         _manifest_field(manifest_row, "program_id"),
-        "variant":            _manifest_field(manifest_row, "variant"),
-        "family":             _manifest_field(manifest_row, "family"),
-        "strategy":           _manifest_field(manifest_row, "strategy"),
-        "expected_patterns":  _manifest_field(manifest_row, "patterns"),
-        "pathological":       _manifest_field(manifest_row, "pathological"),
-        "source_path":        _manifest_field(manifest_row, "source_path"),
+        "family":             _get(manifest_row, "family"),
+        "strategy":           _get(manifest_row, "strategy"),
+        # Program-level context
         "source_lines":       source_lines,
         "complexity_class":   score.complexity_class,
-        "error_count":        error_count,
+        "complexity_ordinal": _complexity_ordinal(score.complexity_class),
         "execution_time_ms":  round(execution_time_ms, 3),
+        "peak_memory_bytes":  peak_memory_bytes,
         "total_suggestions":  total_suggestions,
-        "score":              round(score.score, 2),
-        "grade":              score.grade,
-        "status":             status,
     }
 
-    suggestion_rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, object]] = []
     for suggestion in suggestions:
         loop_depth, is_inside_loop = loop_context.get(suggestion.line, (0, False))
-        suggestion_rows.append(
+
+        # --- Line-level profiling features ---
+        line_stat = profiling.line_stats.get(suggestion.line) if profiling else None
+        execution_count_at_line = line_stat.execution_count if line_stat else 0
+        avg_time_ms_at_line     = round(line_stat.avg_time_ms, 3) if line_stat else 0.0
+        total_time_ms_at_line   = round(line_stat.total_time_ms, 3) if line_stat else 0.0
+        line_dominance = (
+            round(execution_count_at_line / total_lines_executed, 6)
+            if total_lines_executed > 0
+            else 0.0
+        )
+
+        # --- Relative position (0–1 normalized) ---
+        relative_line_position = (
+            round(suggestion.line / source_lines, 4) if source_lines > 0 else 0.0
+        )
+
+        # --- Function-level profiling features ---
+        # FunctionStats don't store line ranges, so we pick the function
+        # with the highest call_count as the best proxy for the dominant
+        # call context. Module-level suggestions fall back to zeros.
+        # A richer mapping (storing def-line → end-line) can replace this
+        # once FunctionDefNode line ranges are tracked in the executor.
+        function_call_count = 0
+        max_recursion_depth = 0
+        if profiling and profiling.function_stats:
+            dominant = max(
+                profiling.function_stats.values(),
+                key=lambda fs: fs.call_count,
+            )
+            function_call_count = dominant.call_count
+            max_recursion_depth = dominant.max_recursion_depth
+
+        rows.append(
             {
-                **execution_context,
-                "pattern":              suggestion.pattern,
-                "severity":             suggestion.severity,
-                "impact_score":         suggestion.impact_score,
-                "line_number":          suggestion.line,
-                "loop_depth":           loop_depth,
-                "is_inside_loop":       is_inside_loop,
-                "co_occurring_patterns": co_occurring_patterns,
+                **program_context,
+                # Core suggestion identity
+                "pattern":                 suggestion.pattern,
+                "severity":                suggestion.severity,
+                "impact_score":            suggestion.impact_score,
+                # Structural (AST)
+                "loop_depth":              loop_depth,
+                "is_inside_loop":          is_inside_loop,
+                "relative_line_position":  relative_line_position,
+                "co_occurring_patterns":   co_occurring,
+                # Dynamic — line level
+                "execution_count_at_line": execution_count_at_line,
+                "avg_time_ms_at_line":     avg_time_ms_at_line,
+                "total_time_ms_at_line":   total_time_ms_at_line,
+                "line_dominance":          line_dominance,
+                # Dynamic — function level
+                "function_call_count":     function_call_count,
+                "max_recursion_depth":     max_recursion_depth,
             }
         )
 
-    return suggestion_rows
+    return rows
