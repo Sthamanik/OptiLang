@@ -31,15 +31,6 @@ KNOWN_PATTERNS = [
 
 KNOWN_COMPLEXITIES = ["O(1)", "O(n)", "O(n²)"]
 
-KNOWN_VARIANTS = [
-    "base",
-    "large_input",
-    "medium_input",
-    "small_input",
-    "with_branch_noise",
-    "with_setup_noise",
-]
-
 SEVERITY_MAP = {"low": 1, "medium": 2, "high": 3}
 
 REQUIRED_FIELDS = {
@@ -52,7 +43,6 @@ REQUIRED_FIELDS = {
     "score",
     "total_suggestions",
     "source_lines",
-    "variant",
 }
 
 
@@ -211,10 +201,6 @@ class MLPipeline:
         for cplx in KNOWN_COMPLEXITIES:
             df[f"cplx_{cplx}"] = (df["complexity_class"] == cplx).astype(float)
 
-        # one-hot encoding — variant
-        for variant in KNOWN_VARIANTS:
-            df[f"var_{variant}"] = (df["variant"] == variant).astype(float)
-
         return df
 
     def _assign_clusters(self, df: pd.DataFrame):
@@ -237,7 +223,6 @@ class MLPipeline:
 
 if __name__ == "__main__":
 
-
     # load pipeline
     pipeline = MLPipeline()
     print()
@@ -255,7 +240,6 @@ if __name__ == "__main__":
                 "score": 92.0,
                 "total_suggestions": 1,
                 "source_lines": 35,
-                "variant": "base",
             },
         ],
         "B — Nested loops (reduce nesting)": [
@@ -269,7 +253,6 @@ if __name__ == "__main__":
                 "score": 87.0,
                 "total_suggestions": 1,
                 "source_lines": 20,
-                "variant": "base",
             },
         ],
         "C — Multi-pattern cleanup (dead code + unused vars + early return)": [
@@ -283,7 +266,6 @@ if __name__ == "__main__":
                 "score": 95.67,
                 "total_suggestions": 3,
                 "source_lines": 12,
-                "variant": "base",
             },
             {
                 "pattern": "unused_vars",
@@ -295,7 +277,6 @@ if __name__ == "__main__":
                 "score": 95.67,
                 "total_suggestions": 3,
                 "source_lines": 12,
-                "variant": "base",
             },
             {
                 "pattern": "early_return",
@@ -307,7 +288,6 @@ if __name__ == "__main__":
                 "score": 95.67,
                 "total_suggestions": 3,
                 "source_lines": 12,
-                "variant": "base",
             },
         ],
         "D — Cache + hoist (repeated computation + loop invariant)": [
@@ -321,7 +301,6 @@ if __name__ == "__main__":
                 "score": 98.5,
                 "total_suggestions": 4,
                 "source_lines": 50,
-                "variant": "base",
             },
             {
                 "pattern": "loop_invariant",
@@ -333,7 +312,6 @@ if __name__ == "__main__":
                 "score": 98.5,
                 "total_suggestions": 4,
                 "source_lines": 50,
-                "variant": "base",
             },
             {
                 "pattern": "repeated_computation",
@@ -345,7 +323,6 @@ if __name__ == "__main__":
                 "score": 98.5,
                 "total_suggestions": 4,
                 "source_lines": 50,
-                "variant": "base",
             },
             {
                 "pattern": "hot_loop",
@@ -357,7 +334,6 @@ if __name__ == "__main__":
                 "score": 98.5,
                 "total_suggestions": 4,
                 "source_lines": 50,
-                "variant": "base",
             },
         ],
     }
@@ -431,7 +407,6 @@ if __name__ == "__main__":
             "score": 86.0,
             "total_suggestions": 1,
             "source_lines": 18,
-            "variant": "base",
         }
     )
     assert (
