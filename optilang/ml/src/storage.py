@@ -13,6 +13,12 @@ EXECUTIONS_CSV = DATA_DIR / "executions.csv"
 
 
 EXECUTION_FIELDNAMES: List[str] = [
+    # --- Identity / grouping ---
+    "program_id",
+    "execution_id",
+    "suggestion_id",
+    "source_path",
+    "source_hash",
     # --- Core suggestion features ---
     "line_number",
     "pattern",

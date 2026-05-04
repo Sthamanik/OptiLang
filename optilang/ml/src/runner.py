@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -35,6 +36,19 @@ def _collect_sources(raw_dir: Path) -> List[Path]:
     return sorted(raw_dir.rglob("*.py"))
 
 
+def _program_id(source_path: Path, raw_dir: Path = RAW_DIR) -> str:
+    """Return a stable corpus-relative program identifier."""
+    try:
+        return source_path.resolve().relative_to(raw_dir.resolve()).as_posix()
+    except ValueError:
+        return source_path.resolve().as_posix()
+
+
+def _source_hash(source: str) -> str:
+    """Short stable content hash used to distinguish execution versions."""
+    return hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
@@ -43,10 +57,14 @@ def _collect_sources(raw_dir: Path) -> List[Path]:
 def run_one(
     source_path: Path,
     timeout_seconds: float = 5.0,
+    raw_dir: Path = RAW_DIR,
 ) -> List[Dict[str, object]]:
     """Execute one source file and return flat suggestion rows."""
 
     source = source_path.read_text(encoding="utf-8")
+    program_id = _program_id(source_path, raw_dir)
+    source_hash = _source_hash(source)
+    execution_id = f"{program_id}@{source_hash}"
 
     result = execute(source, timeout_seconds=timeout_seconds)
     ast = None
@@ -71,6 +89,12 @@ def run_one(
         result=result,
         report=report,
         score=score,
+        metadata_row={
+            "program_id": program_id,
+            "source_path": source_path.as_posix(),
+            "source_hash": source_hash,
+        },
+        execution_id=execution_id,
         ast=ast,
     )
 
@@ -96,7 +120,11 @@ def run_all(
 
     for i, source_path in enumerate(sources, 1):
         try:
-            rows = run_one(source_path, timeout_seconds=timeout_seconds)
+            rows = run_one(
+                source_path,
+                timeout_seconds=timeout_seconds,
+                raw_dir=raw_dir,
+            )
             all_rows.extend(rows)
             print(f"[{i}/{len(sources)}] OK   {source_path.name}  →  {len(rows)} rows")
         except Exception as exc:

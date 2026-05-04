@@ -44,6 +44,31 @@ def _profiling_time_ms(result: ExecutionResult) -> float:
     return result.execution_time * 1000.0
 
 
+def _identity_fields(
+    metadata_row: Optional[Dict[str, str]],
+    execution_id: Optional[str],
+    pattern: str,
+    line: int,
+) -> Dict[str, str]:
+    metadata_row = metadata_row or {}
+    resolved_execution_id = execution_id or str(metadata_row.get("execution_id", ""))
+    program_id = str(metadata_row.get("program_id", resolved_execution_id))
+    source_path = str(metadata_row.get("source_path", ""))
+    source_hash = str(metadata_row.get("source_hash", ""))
+    suggestion_id = (
+        f"{resolved_execution_id}:{pattern}:{line}"
+        if resolved_execution_id
+        else f"{program_id}:{pattern}:{line}"
+    )
+    return {
+        "program_id": program_id,
+        "execution_id": resolved_execution_id,
+        "suggestion_id": suggestion_id,
+        "source_path": source_path,
+        "source_hash": source_hash,
+    }
+
+
 def _walk_children(node: ASTNode) -> Iterable[ASTNode]:
     """Yield direct AST children, including tuple-packed branch nodes."""
     for field in dataclasses.fields(node):
@@ -378,8 +403,8 @@ def extract(
     result          ExecutionResult from interpreter pipeline.
     report          OptimizationReport from analyzer. May be None.
     score           ScoreReport from scoring stage.
-    metadata_row    Compatibility argument; not emitted as clustering features.
-    execution_id    Compatibility argument; not emitted as a clustering feature.
+    metadata_row    Optional identity/traceability fields for the source program.
+    execution_id    Stable id for this exact source execution/version.
     ast             Parsed AST root. Used for loop depth resolution. May be None.
     """
     if result.errors:
@@ -521,6 +546,12 @@ def extract(
 
         rows.append(
             {
+                **_identity_fields(
+                    metadata_row=metadata_row,
+                    execution_id=execution_id,
+                    pattern=suggestion.pattern,
+                    line=suggestion.line,
+                ),
                 **program_context,
                 # Core suggestion identity
                 "line_number": suggestion.line,
