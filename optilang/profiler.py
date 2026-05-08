@@ -11,6 +11,7 @@ This module provides line-by-line profiling during code execution, collecting:
 """
 
 import json
+import math
 import random
 import sys
 import time
@@ -312,8 +313,11 @@ def detect_complexity_with_confidence(
         complexity = "O(n)"
         base_confidence = 0.75
     elif max_count <= 10_000:
-        ratio = max_count / max(unique_lines, 1)
-        complexity = "O(n log n)" if ratio < 200 else "O(n^2)"
+        sqrt_max = math.sqrt(max_count)
+        hot_line_count = sum(
+            1 for s in line_stats.values() if s.execution_count > sqrt_max
+        )
+        complexity = "O(n²)" if hot_line_count >= 2 else "O(n log n)"
         base_confidence = 0.65
     elif max_count <= 1_000_000:
         complexity = "O(n^2)"
