@@ -317,7 +317,11 @@ def detect_complexity_with_confidence(
         hot_line_count = sum(
             1 for s in line_stats.values() if s.execution_count > sqrt_max
         )
-        complexity = "O(n²)" if hot_line_count >= 2 else "O(n log n)"
+        total_lines = len(line_stats)
+        hot_ratio = hot_line_count / max(total_lines, 1)
+        complexity = (
+            "O(n²)" if (hot_line_count >= 2 and hot_ratio < 0.5) else "O(n log n)"
+        )
         base_confidence = 0.65
     elif max_count <= 1_000_000:
         complexity = "O(n^2)"
