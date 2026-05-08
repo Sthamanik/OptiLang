@@ -97,7 +97,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Pattern classification
@@ -287,6 +287,9 @@ EXPONENTIAL_COUNT_THRESHOLD: int = 1_000_000
 MIN_N: int = 4
 
 
+# Internal fallback only — used when profiling_data does not contain
+# Primary path: Scorer._score_efficiency_complexity reads
+# profiling_data["complexity_estimate"] set by Profiler.stop().
 def _detect_complexity(line_stats: Dict[str, Any]) -> str:
     """
     Heuristic Big-O detection from a single execution trace.
@@ -334,14 +337,15 @@ def _detect_complexity(line_stats: Dict[str, Any]) -> str:
 
 
 def _classify_linear_or_below(max_c: int, n: int) -> str:
-    log_n = math.log2(n)
+    estimated_n = max(math.isqrt(max_c), 1)
+    log_n = math.log2(max(estimated_n, 2))
     if max_c <= 1:
         return "O(1)"
     if max_c <= log_n * 2:
         return "O(log n)"
-    if max_c <= n * 2:
+    if max_c <= estimated_n * 2:
         return "O(n)"
-    if max_c <= n * log_n * 3:
+    if max_c <= estimated_n * log_n * 3:
         return "O(n log n)"
     return "O(n²)"
 
@@ -662,12 +666,14 @@ class Scorer:
              profiling_partial_flag, optimizer_partial_flag)
         """
         # Complexity sub-score — requires profiling data
-        if not self._line_stats:
+        if not self._line_stats or self._profiling is None:
             c_sub = PARTIAL_COMPLEXITY
             complexity_class = "Unknown"
             profiling_partial = True
         else:
-            complexity_class = _detect_complexity(self._line_stats)
+            complexity_class = self._profiling.get(
+                "complexity_estimate"
+            ) or _detect_complexity(self._line_stats)
             c_sub = _coverage_weighted_complexity(complexity_class, self._line_stats)
             profiling_partial = False
 
@@ -925,6 +931,7 @@ def _build_dimension_hint(
     Returns:
         A concise, specific hint string.
     """
+    seen_patterns: Set[str] = set()
     if name == "Correctness":
         return (
             "Fix the errors in your program first. "
@@ -943,15 +950,14 @@ def _build_dimension_hint(
         # Efficiency part — only the patterns actually detected
         if suggestions:
             pattern_lines = []
+            seen_patterns.clear()
             for s in suggestions:
+                if s.pattern in seen_patterns:
+                    continue
+                seen_patterns.add(s.pattern)
                 label = _PATTERN_LABELS.get(s.pattern)
                 if label:
                     pattern_lines.append(f"• {label.capitalize()}.")
-            if pattern_lines:
-                parts.append(
-                    "The optimizer found the following issues:\n"
-                    + "\n".join(pattern_lines)
-                )
 
         if not parts:
             # complexity is perfect (15/15) and no efficiency suggestions —
@@ -967,7 +973,11 @@ def _build_dimension_hint(
     # Quality and Maintainability — list only what was actually found
     if suggestions:
         pattern_lines = []
+        seen_patterns.clear()
         for s in suggestions:
+            if s.pattern in seen_patterns:
+                continue
+            seen_patterns.add(s.pattern)
             label = _PATTERN_LABELS.get(s.pattern)
             if label:
                 pattern_lines.append(f"• {label.capitalize()}.")
