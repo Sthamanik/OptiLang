@@ -21,20 +21,22 @@ import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import pytest
+
+from optilang import execute
 from optilang.profiler import (
+    FunctionStats,
+    LineStats,
     Profiler,
     ProfilerConfig,
     ProfilingData,
-    LineStats,
-    FunctionStats,
     _estimate_deep_object_size,
     _safe_getsizeof,
-    estimate_memory_bytes,
     detect_complexity,
     detect_complexity_with_confidence,
+    estimate_memory_bytes,
     profile_execution,
 )
-from optilang import execute
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Unit Tests: estimate_memory_bytes
