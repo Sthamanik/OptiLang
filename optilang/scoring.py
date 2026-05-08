@@ -337,15 +337,14 @@ def _detect_complexity(line_stats: Dict[str, Any]) -> str:
 
 
 def _classify_linear_or_below(max_c: int, n: int) -> str:
-    estimated_n = max(math.isqrt(max_c), 1)
-    log_n = math.log2(max(estimated_n, 2))
+    log_n = math.log2(n)
     if max_c <= 1:
         return "O(1)"
     if max_c <= log_n * 2:
         return "O(log n)"
-    if max_c <= estimated_n * 2:
+    if max_c <= n * 2:
         return "O(n)"
-    if max_c <= estimated_n * log_n * 3:
+    if max_c <= n * log_n * 3:
         return "O(n log n)"
     return "O(n²)"
 
@@ -949,8 +948,8 @@ def _build_dimension_hint(
 
         # Efficiency part — only the patterns actually detected
         if suggestions:
-            pattern_lines = []
             seen_patterns.clear()
+            pattern_lines = []
             for s in suggestions:
                 if s.pattern in seen_patterns:
                     continue
@@ -958,6 +957,11 @@ def _build_dimension_hint(
                 label = _PATTERN_LABELS.get(s.pattern)
                 if label:
                     pattern_lines.append(f"• {label.capitalize()}.")
+            if pattern_lines:
+                parts.append(
+                    "The optimizer found the following efficiency issues:\n"
+                    + "\n".join(pattern_lines)
+                )
 
         if not parts:
             # complexity is perfect (15/15) and no efficiency suggestions —
