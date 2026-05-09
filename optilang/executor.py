@@ -220,6 +220,8 @@ class Executor:
                               and enable_profiling is True, one is created.
             enable_profiling: Whether to collect profiling data.
         """
+        self._loop_depth: int = 0
+        self._max_loop_depth_seen: int = 0
         self.timeout_seconds = timeout_seconds
         self._start_time = 0.0
         self._output: List[str] = []
@@ -355,6 +357,8 @@ class Executor:
                     self._execute_block(node.else_block, env)
 
         elif isinstance(node, WhileNode):
+            self._loop_depth += 1
+            self._max_loop_depth_seen = max(self._max_loop_depth_seen, self._loop_depth)
             while self._truthy(self._eval(node.condition, env)):
                 self._check_timeout(node)
                 try:
@@ -363,8 +367,11 @@ class Executor:
                     break
                 except _ContinueSignal:
                     continue
+            self._loop_depth -= 1
 
         elif isinstance(node, ForNode):
+            self._loop_depth += 1
+            self._max_loop_depth_seen = max(self._max_loop_depth_seen, self._loop_depth)
             iterable = self._eval(node.iterable, env)
             try:
                 items = list(iterable)
@@ -381,6 +388,7 @@ class Executor:
                     break
                 except _ContinueSignal:
                     continue
+            self._loop_depth -= 1
 
         elif isinstance(node, FunctionDefNode):
             func = UserFunction(node, env)
