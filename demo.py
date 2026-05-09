@@ -15,8 +15,8 @@ outcome:
     Program 4 — Broken code      Runtime errors, structural problems
 """
 
-from dataclasses import dataclass
 import textwrap
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from optilang import execute
@@ -326,6 +326,27 @@ answer = divide(10, 0)
 print(answer)
 """
 
+# Program 5 — Complex code: nested loops with multiple operations, moderate complexity o(n2)
+PROGRAM_5 = """
+numbers = [1, 2, 3]
+
+for i in numbers:
+    for j in numbers:
+        print(i, j)
+"""
+
+# Program 6 — Simple loop: O(n) efficiency, straightforward code, no issues
+PROGRAM_6 = """
+numbers = [1, 2, 3, 4, 5]
+
+total = 0
+
+for num in numbers:
+    total += num
+
+print(total)
+"""
+
 # Main
 
 if __name__ == "__main__":
@@ -334,6 +355,8 @@ if __name__ == "__main__":
         ("Program 2 — Linear Loop", PROGRAM_2),
         ("Program 3 — Nested Loops", PROGRAM_3),
         ("Program 4 — Broken Code", PROGRAM_4),
+        ("Program 5 — Complex Code", PROGRAM_5),
+        ("Program 6 — Simple Loop", PROGRAM_6),
     ]
 
     print()
