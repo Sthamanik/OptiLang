@@ -186,7 +186,7 @@ def _safe_getsizeof(value: Any) -> int:
     """Best-effort object size lookup with fallback."""
     try:
         return sys.getsizeof(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 28
 
 
@@ -287,8 +287,44 @@ def estimate_memory_bytes(
     return _estimate_memory_shallow(env_values)
 
 
+def _detect_nested_structure(max_count: int) -> bool:
+    """
+    Return True if max_count is likely the result of nested loops.
+
+    Checks:
+    1. Perfect square: n*n (e.g. 9=3², 100=10², 64=8²)
+    2. Perfect cube: n*n*n (e.g. 125=5³, 27=3³, 8=2³)
+    3. Product of two distinct factors both > sqrt(max_count)*0.3:
+       (e.g. 24=6*4, 15=5*3, 18=6*3)
+       This catches non-square nested loops.
+    """
+    if max_count <= 3:
+        return False
+
+    # Check perfect square
+    sqrt_val = math.isqrt(max_count)
+    if sqrt_val * sqrt_val == max_count and sqrt_val > 1:
+        return True
+
+    # Check perfect cube
+    cbrt_val = round(max_count ** (1 / 3))
+    for c in [cbrt_val - 1, cbrt_val, cbrt_val + 1]:
+        if c > 1 and c * c * c == max_count:
+            return True
+
+    min_factor = max(2, int(math.sqrt(max_count) * 0.3))
+    for a in range(min_factor, math.isqrt(max_count) + 1):
+        if max_count % a == 0:
+            b = max_count // a
+            if b >= min_factor and a != b:
+                return True
+
+    return False
+
+
 def detect_complexity_with_confidence(
     line_stats: Dict[int, LineStats],
+    max_loop_depth: int = 1,
 ) -> Tuple[str, float]:
     """
     Return complexity class and heuristic confidence score.
@@ -303,26 +339,152 @@ def detect_complexity_with_confidence(
     unique_lines = len(line_stats)
     total_executions = sum(counts)
 
+    if max_loop_depth >= 3:
+        pass
+    elif max_loop_depth == 2:
+        if max_count > 3:
+            return "O(n^2)", 0.80
+
     if max_count <= 1:
         return "O(1)", 0.95
-
     if max_count <= 15:
-        complexity = "O(log n)"
-        base_confidence = 0.65
+        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
+        if not active_stats:
+            return "O(1)", 0.95
+        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
+        if hot_line_count == 1:
+            sqrt_max = math.isqrt(max_count)
+            is_perfect_square = (sqrt_max * sqrt_max == max_count) and sqrt_max > 1
+            non_hot_counts = [
+                s.execution_count
+                for s in active_stats
+                if 1 < s.execution_count < max_count
+            ]
+            has_divisor_pattern = any(max_count % c == 0 for c in non_hot_counts)
+            if is_perfect_square or has_divisor_pattern:
+                return "O(n^2)", 0.50
+            all_other_once = all(
+                s.execution_count == 1
+                for s in active_stats
+                if s.execution_count < max_count
+            )
+            if all_other_once and max_count > 3:
+                return "O(n)", 0.50
+            else:
+                return "O(log n)", 0.55
+        non_max_counts = [
+            s.execution_count for s in active_stats if 1 < s.execution_count < max_count
+        ]
+        has_outer = len(non_max_counts) > 0
+        if has_outer:
+            return "O(n^2)", 0.50
+        else:
+            return "O(n)", 0.55
     elif max_count <= 1_000:
-        complexity = "O(n)"
-        base_confidence = 0.75
+        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
+
+        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
+
+        all_others_once = all(
+            s.execution_count == 1
+            for s in active_stats
+            if s.execution_count < max_count
+        )
+
+        if hot_line_count == 1 and all_others_once:
+            complexity = "O(n)"
+            base_confidence = 0.70
+
+        elif hot_line_count >= 2:
+            non_max_counts = [
+                s.execution_count
+                for s in active_stats
+                if 1 < s.execution_count < max_count
+            ]
+            if non_max_counts:
+                complexity = "O(n^2)"
+                base_confidence = 0.75
+            elif _detect_nested_structure(max_count):
+                complexity = "O(n^2)"
+                base_confidence = 0.65
+            else:
+                complexity = "O(n)"
+                base_confidence = 0.70
+
+        else:
+            intermediate_counts = [
+                s.execution_count
+                for s in active_stats
+                if 1 < s.execution_count < max_count
+            ]
+            sqrt_max = math.isqrt(max_count)
+            has_significant_outer = any(c > sqrt_max for c in intermediate_counts)
+            if has_significant_outer and _detect_nested_structure(max_count):
+                complexity = "O(n^2)"
+                base_confidence = 0.70
+            else:
+                complexity = "O(n)"
+                base_confidence = 0.70
     elif max_count <= 10_000:
-        sqrt_max = math.sqrt(max_count)
-        hot_line_count = sum(
-            1 for s in line_stats.values() if s.execution_count > sqrt_max
+        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
+
+        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
+
+        all_others_once = all(
+            s.execution_count == 1
+            for s in active_stats
+            if s.execution_count < max_count
         )
-        total_lines = len(line_stats)
-        hot_ratio = hot_line_count / max(total_lines, 1)
-        complexity = (
-            "O(n²)" if (hot_line_count >= 2 and hot_ratio < 0.5) else "O(n log n)"
-        )
-        base_confidence = 0.65
+
+        if hot_line_count == len(active_stats) and hot_line_count > 5:
+            complexity = "O(n log n)"
+            base_confidence = 0.65
+
+        elif hot_line_count == 1 and all_others_once:
+            sqrt_val = math.isqrt(max_count)
+            is_perfect_square = sqrt_val * sqrt_val == max_count and sqrt_val > 1
+            cbrt_val = round(max_count ** (1 / 3))
+            is_perfect_cube = any(
+                c > 1 and c * c * c == max_count
+                for c in [cbrt_val - 1, cbrt_val, cbrt_val + 1]
+            )
+            if is_perfect_square or is_perfect_cube:
+                complexity = "O(n^2)"
+                base_confidence = 0.60
+            else:
+                complexity = "O(n)"
+                base_confidence = 0.70
+
+        elif hot_line_count >= 2:
+            non_max_counts = [
+                s.execution_count
+                for s in active_stats
+                if 1 < s.execution_count < max_count
+            ]
+            if non_max_counts:
+                complexity = "O(n^2)"
+                base_confidence = 0.75
+            elif _detect_nested_structure(max_count):
+                complexity = "O(n^2)"
+                base_confidence = 0.65
+            else:
+                complexity = "O(n)"
+                base_confidence = 0.70
+
+        else:
+            intermediate_counts = [
+                s.execution_count
+                for s in active_stats
+                if 1 < s.execution_count < max_count
+            ]
+            sqrt_max = math.isqrt(max_count)
+            has_significant_outer = any(c > sqrt_max for c in intermediate_counts)
+            if has_significant_outer and _detect_nested_structure(max_count):
+                complexity = "O(n^2)"
+                base_confidence = 0.70
+            else:
+                complexity = "O(n log n)"
+                base_confidence = 0.65
     elif max_count <= 1_000_000:
         complexity = "O(n^2)"
         base_confidence = 0.8
@@ -415,7 +577,7 @@ class Profiler:
         """Begin a profiling session. Call this before any code executes."""
         self.data.start_time = time.perf_counter()
 
-    def stop(self) -> None:
+    def stop(self, max_loop_depth: int = 1) -> None:
         """
         End the profiling session and compute final aggregates.
 
@@ -431,7 +593,10 @@ class Profiler:
         self.data.total_lines_executed = sum(
             s.execution_count for s in self.data.line_stats.values()
         )
-        complexity, confidence = detect_complexity_with_confidence(self.data.line_stats)
+        complexity, confidence = detect_complexity_with_confidence(
+            self.data.line_stats,
+            max_loop_depth=max_loop_depth,
+        )
         sampling_rate = self.config.normalized_sampling_rate()
         sampling_adjusted_confidence = confidence * (0.5 + (0.5 * sampling_rate))
         self.data.complexity_estimate = complexity
