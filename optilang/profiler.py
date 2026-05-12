@@ -33,6 +33,8 @@ from .constants import (
     COMPLEXITY_N,
     COMPLEXITY_N2,
     COMPLEXITY_N2LOGN,
+    COMPLEXITY_N3,
+    COMPLEXITY_N4,
     COMPLEXITY_NK,
     COMPLEXITY_NLOGN,
     COMPLEXITY_O1,
@@ -721,6 +723,15 @@ def _analyze_nested_loops(ast: Optional["ASTNode"]) -> Optional[str]:
                     # Check for depth 3 with log pattern → O(n² log n)
                     if 3 in depth_patterns and depth_patterns[3] == "log":
                         return "n2logn"
+                    # Check for 4+ nested loops → O(n⁴)
+                    if max_depth == 4:
+                        return "n4"
+                    # Check for depth 3 (3 nested loops) → O(n³)
+                    if max_depth == 3:
+                        return "n3"
+                    # More than 4 → O(n^k)
+                    if max_depth > 4:
+                        return "nk"
                     return "n2"
 
     return None
@@ -865,19 +876,29 @@ def detect_complexity_with_confidence(
             return recurse_complexity, recurse_conf
 
     # Check for nested loops with different complexity patterns
-    # (O(n log n), O(n² log n))
+    # (O(n log n), O(n² log n), O(n³))
     if ast is not None:
         nested_pattern = _analyze_nested_loops(ast)
         if nested_pattern == "nlogn":
             return COMPLEXITY_NLOGN, 0.85
         elif nested_pattern == "n2logn":
             return COMPLEXITY_N2LOGN, 0.85
+        elif nested_pattern == "n3":
+            return COMPLEXITY_N3, 0.85
+        elif nested_pattern == "n4":
+            return COMPLEXITY_N4, 0.85
+        elif nested_pattern == "nk":
+            return COMPLEXITY_NK, 0.85
         elif nested_pattern == "n2":
             return COMPLEXITY_N2, 0.85
 
     # Use AST loop depth as primary signal (even if max_count is 1)
-    if max_loop_depth >= 3:
+    if max_loop_depth >= 5:
         return COMPLEXITY_NK, 0.90
+    elif max_loop_depth == 4:
+        return COMPLEXITY_N4, 0.85
+    elif max_loop_depth == 3:
+        return COMPLEXITY_N3, 0.85
     elif max_loop_depth == 2:
         # For depth 2, check if inner loop is O(log n) pattern
         if ast is not None:

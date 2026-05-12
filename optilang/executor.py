@@ -14,6 +14,7 @@ from .ast_nodes import (
     ASTNode,
     AssignmentNode,
     IndexAssignmentNode,
+    IndexedAugmentedAssignmentNode,
     AugmentedAssignmentNode,
     BinaryOpNode,
     BooleanNode,
@@ -383,6 +384,45 @@ class Executor:
             value = self._eval(node.value, env)
             new_value = self._apply_augmented_op(node.operator, current, value, node)
             env.assign(node.target.name, new_value)
+
+        elif isinstance(node, IndexedAugmentedAssignmentNode):
+            # Evaluate target (IndexNode) to get the list and index
+            collection = self._eval(node.target.collection, env)
+            index = self._eval(node.target.index, env)
+            value = self._eval(node.value, env)
+
+            # Get current value at index and apply augmented operation
+            if isinstance(collection, list):
+                if not isinstance(index, int):
+                    raise OptiTypeError(
+                        "list indices must be integers",
+                        getattr(node.target, "line", None),
+                    )
+                if index < 0:
+                    index = len(collection) + index
+                if index < 0 or index >= len(collection):
+                    raise OptiIndexError(
+                        int(index),
+                        len(collection),
+                        getattr(node.target, "line", None),
+                    )
+                current = collection[index]
+                new_value = self._apply_augmented_op(
+                    node.operator, current, value, node
+                )
+                collection[index] = new_value
+            elif isinstance(collection, dict):
+                current = collection.get(index)
+                new_value = self._apply_augmented_op(
+                    node.operator, current, value, node
+                )
+                collection[index] = new_value
+            else:
+                raise OptiTypeError(
+                    f"'{type(collection).__name__}' object does not support "
+                    f"item assignment",
+                    getattr(node.target, "line", None),
+                )
 
         elif isinstance(node, IfNode):
             condition = self._eval(node.condition, env)

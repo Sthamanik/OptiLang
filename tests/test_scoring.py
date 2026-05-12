@@ -412,7 +412,7 @@ class TestComplexityDetection:
     def test_complexity_points_covers_all_classes(self) -> None:
         expected_classes = {
             "O(1)", "O(log n)", "O(n)", "O(n log n)",
-            "O(n²)", "O(n² log n)", "O(n³)", "O(n^k)", "O(2^n)",
+            "O(n²)", "O(n² log n)", "O(n³)", "O(n⁴)", "O(n^k)", "O(2^n)",
         }
         assert set(COMPLEXITY_POINTS.keys()) == expected_classes
 
@@ -425,7 +425,7 @@ class TestComplexityDetection:
     def test_better_complexity_earns_more_points(self) -> None:
         """Lower-complexity classes must score at least as many points."""
         order = ["O(1)", "O(log n)", "O(n)", "O(n log n)",
-                 "O(n²)", "O(n³)", "O(n^k)", "O(2^n)"]
+                 "O(n²)", "O(n³)", "O(n⁴)", "O(n^k)", "O(2^n)"]
         for i in range(len(order) - 1):
             assert COMPLEXITY_POINTS[order[i]] >= COMPLEXITY_POINTS[order[i + 1]], (
                 f"{order[i]} should score ≥ {order[i + 1]}"

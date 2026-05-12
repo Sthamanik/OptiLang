@@ -94,9 +94,18 @@ class IndexAssignmentNode(ASTNode):
 # Augmented Assignments
 @dataclass
 class AugmentedAssignmentNode(ASTNode):
-    """Represents augmented assignment: x += 5"""
+    """Represents augmented assignment: x += 5 or arr[i] += 5"""
 
     target: IdentifierNode
+    operator: str  # +=, -=, *=, etc.
+    value: ASTNode
+
+
+@dataclass
+class IndexedAugmentedAssignmentNode(ASTNode):
+    """Represents indexed augmented assignment: arr[i] += value"""
+
+    target: IndexNode
     operator: str  # +=, -=, *=, etc.
     value: ASTNode
 
