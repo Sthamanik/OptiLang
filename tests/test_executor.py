@@ -625,19 +625,6 @@ class TestExecutorEdgeCases:
         result = execute("x = 1\nx /= 0")
         assert result.errors == ["Line 2: Division by zero"]
 
-    def test_apply_augmented_op_rejects_unknown_operator(self) -> None:
-        executor = Executor(enable_profiling=False)
-
-        with pytest.raises(
-            OptiRuntimeError, match="Unsupported augmented operator: %="
-        ):
-            executor._apply_augmented_op(
-                "%=",
-                4,
-                2,
-                NumberNode(line=1, column=1, value=0),
-            )
-
     def test_builtin_type_error_is_wrapped(self) -> None:
         result = execute("print(len())")
         assert "Invalid function call" in result.errors[0]

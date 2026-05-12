@@ -6,7 +6,7 @@ This module provides line-by-line profiling during code execution, collecting:
 - Time spent on each line (total, average, min, max)
 - Function call statistics (with caller tracking and recursion depth)
 - Memory estimation (variable count + byte-level size estimation)
-- Complexity detection (O(1), O(n), O(n^2), etc.)
+- Complexity detection (O(1), O(n), O(n²), etc.)
 - High-level summary for web API consumption
 """
 
@@ -17,6 +17,26 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from .ast_nodes import (
+    ASTNode,
+    AssignmentNode,
+    AugmentedAssignmentNode,
+    BinaryOpNode,
+    ForNode,
+    IdentifierNode,
+    WhileNode,
+)
+from .constants import (
+    COMPLEXITY_EXP,
+    COMPLEXITY_LOGN,
+    COMPLEXITY_N,
+    COMPLEXITY_N2,
+    COMPLEXITY_N2LOGN,
+    COMPLEXITY_NK,
+    COMPLEXITY_NLOGN,
+    COMPLEXITY_O1,
+)
 
 
 @dataclass
@@ -287,222 +307,620 @@ def estimate_memory_bytes(
     return _estimate_memory_shallow(env_values)
 
 
-def _detect_nested_structure(max_count: int) -> bool:
+def _analyze_execution_pattern(
+    line_stats: Dict[int, LineStats],
+) -> Dict[str, Any]:
     """
-    Return True if max_count is likely the result of nested loops.
+    Analyze execution count patterns to infer complexity class.
 
-    Checks:
-    1. Perfect square: n*n (e.g. 9=3², 100=10², 64=8²)
-    2. Perfect cube: n*n*n (e.g. 125=5³, 27=3³, 8=2³)
-    3. Product of two distinct factors both > sqrt(max_count)*0.3:
-       (e.g. 24=6*4, 15=5*3, 18=6*3)
-       This catches non-square nested loops.
+    Uses ratio-based analysis which is independent of actual input size n.
+    Returns a dict with analysis results for complexity detection.
     """
-    if max_count <= 3:
-        return False
+    if not line_stats:
+        return {
+            "pattern": "empty",
+            "max_ratio": 1.0,
+            "second_ratio": 1.0,
+            "hot_line_count": 0,
+            "unique_hot_lines": 0,
+            "max_count": 0,
+            "total_lines": 0,
+        }
 
-    # Check perfect square
-    sqrt_val = math.isqrt(max_count)
-    if sqrt_val * sqrt_val == max_count and sqrt_val > 1:
-        return True
+    active_stats = [s for s in line_stats.values() if s.execution_count > 0]
+    if not active_stats:
+        return {
+            "pattern": "empty",
+            "max_ratio": 1.0,
+            "second_ratio": 1.0,
+            "hot_line_count": 0,
+            "unique_hot_lines": 0,
+            "max_count": 0,
+            "total_lines": 0,
+        }
 
-    # Check perfect cube
-    cbrt_val = round(max_count ** (1 / 3))
-    for c in [cbrt_val - 1, cbrt_val, cbrt_val + 1]:
-        if c > 1 and c * c * c == max_count:
-            return True
+    counts = sorted([s.execution_count for s in active_stats])
+    max_count = counts[-1]
+    total_lines = len(counts)
 
-    min_factor = max(2, int(math.sqrt(max_count) * 0.3))
-    for a in range(min_factor, math.isqrt(max_count) + 1):
-        if max_count % a == 0:
-            b = max_count // a
-            if b >= min_factor and a != b:
-                return True
+    # Calculate ratios between execution counts
+    second_max = counts[-2] if len(counts) > 1 else 1
+    third_max = counts[-3] if len(counts) > 2 else 1
 
-    return False
+    max_ratio = max_count / second_max if second_max > 0 else float(max_count)
+    second_ratio = second_max / third_max if third_max > 0 else 1.0
+
+    # Count hot lines (lines executing at >= 50% of max)
+    hot_threshold = max_count * 0.5
+    hot_counts = [c for c in counts if c >= hot_threshold]
+    hot_line_count = len(hot_counts)
+
+    # Count lines executing at >= 90% of max (truly hot lines)
+    very_hot_threshold = max_count * 0.9
+    unique_hot_lines = sum(1 for c in counts if c >= very_hot_threshold)
+
+    # Determine pattern based on ratios
+    if max_count <= 1:
+        pattern = "constant"
+    elif max_ratio <= 2.0 and hot_line_count >= max(3, total_lines * 0.5):
+        # Many similar hot lines (ratio ≈ 1) → O(n log n) pattern
+        pattern = "nlogn"
+    elif max_ratio <= 2.0 and hot_line_count <= 1 and max_count >= 8:
+        # One hot line, low max_ratio → O(log n) ONLY if max_count >= 8
+        # [1, 2, 3] → linear (max_count=3 is too small)
+        # [1, 8, 3] → log (max_count=8, ratio=2.67... wait, max_ratio=8/3=2.67 > 2.0)
+        # Let me recalculate: counts=[1,2,3], max_ratio=3/2=1.5, hot_line_count=1
+        # This matches the existing "log" branch, so we need max_count >= 8
+        pattern = "log"
+    elif (
+        max_ratio <= 2.5
+        and hot_line_count == 2
+        and unique_hot_lines == 2
+        and max_count >= 5
+    ):
+        # Two equal hot lines = check for quadratic vs linear
+        # [1, 100, 10000, 10000, 1] → has n as intermediate
+        #   (100 = sqrt(10000)) → quadratic
+        # [1, 100, 100, 1] → no intermediate between 1 and max → linear
+        hot_line_ratio = hot_line_count / total_lines if total_lines > 0 else 0
+        # Check for sqrt(n) intermediate (nested loop signal)
+        intermediate_counts = [c for c in counts if 1 < c < max_count]
+        has_sqrt_intermediate = any(
+            abs(c - math.sqrt(max_count)) <= max(2, c * 0.05)
+            for c in intermediate_counts
+        )
+        # Quadratic if: hot lines dominate OR sqrt(n) intermediate exists
+        if hot_line_ratio >= 0.5 or (has_sqrt_intermediate and max_count >= 100):
+            pattern = "quadratic"
+        else:
+            pattern = "linear"
+    elif (
+        max_ratio > 2.0
+        and hot_line_count <= 2
+        and unique_hot_lines <= 1
+        and max_count <= 12
+        and max_count >= 8
+    ):
+        # One dominant hot line with small max_count → O(log n)
+        # e.g., [1, 8, 3] → one hot line with count 8, rest much smaller (8 = 2^3)
+        # [1, 2, 3] → linear (max_count = 3 is too small for log, could be n=3)
+        pattern = "log"
+    elif max_ratio > 2.0 and hot_line_count >= 2:
+        # Multiple hot lines with ratio > 2 suggests quadratic
+        pattern = "quadratic"
+    elif (
+        max_ratio <= 2.0
+        and hot_line_count >= 2
+        and unique_hot_lines >= 2
+        and max_count > 20
+    ):
+        # Multiple hot lines with equal counts AND large max_count = quadratic signal
+        # Small max_count (<= 20) with equal hot lines is likely just linear
+        pattern = "quadratic"
+    else:
+        pattern = "linear"
+
+    return {
+        "pattern": pattern,
+        "max_ratio": max_ratio,
+        "second_ratio": second_ratio,
+        "hot_line_count": hot_line_count,
+        "unique_hot_lines": unique_hot_lines,
+        "max_count": max_count,
+        "total_lines": total_lines,
+        "unique_lines": total_lines,  # Alias for clarity
+    }
+
+
+def _get_max_loop_depth_from_ast(
+    node: Optional["ASTNode"], current_depth: int = 0
+) -> int:
+    """
+    Recursively compute the maximum loop nesting depth in an AST.
+
+    Returns the deepest nesting of ForNode / WhileNode nodes.
+    Non-loop nodes are transparent (pass depth unchanged).
+    """
+    if node is None:
+        return current_depth
+
+    max_depth = current_depth
+
+    if isinstance(node, (ForNode, WhileNode)):
+        # Recurse into body with increased depth
+        body_max = current_depth
+        for child in getattr(node, "body", []):
+            body_max = max(
+                body_max, _get_max_loop_depth_from_ast(child, current_depth + 1)
+            )
+        max_depth = max(max_depth, body_max)
+    else:
+        # Recurse into all children (transparent pass-through)
+        for child in vars(node).values():
+            if isinstance(child, ASTNode):
+                max_depth = max(
+                    max_depth, _get_max_loop_depth_from_ast(child, current_depth)
+                )
+            elif isinstance(child, list):
+                for item in child:
+                    if isinstance(item, ASTNode):
+                        max_depth = max(
+                            max_depth, _get_max_loop_depth_from_ast(item, current_depth)
+                        )
+            elif isinstance(child, tuple):
+                for elem in child:
+                    if isinstance(elem, ASTNode):
+                        max_depth = max(
+                            max_depth, _get_max_loop_depth_from_ast(elem, current_depth)
+                        )
+
+    return max_depth
+
+
+def _count_loop_iterations_at_depth(
+    line_stats: Dict[int, LineStats],
+    ast: "ASTNode",
+    current_depth: int = 0,
+) -> Dict[int, int]:
+    """
+    Walk the AST and record the maximum execution count seen at each loop depth.
+
+    Returns {depth: max_execution_count_seen_at_that_depth}.
+    depth 0 = top-level, depth 1 = first loop body, etc.
+    """
+    depth_counts: Dict[int, int] = {}
+
+    def walk(node: Optional["ASTNode"], depth: int) -> None:
+        if node is None:
+            return
+
+        if isinstance(node, (ForNode, WhileNode)):
+            # Record execution count for this loop's body at incremented depth
+            line_count = line_stats.get(node.line)
+            if line_count and line_count.execution_count > 0:
+                depth_counts[depth + 1] = max(
+                    depth_counts.get(depth + 1, 0), line_count.execution_count
+                )
+            # Walk body at incremented depth
+            for child in getattr(node, "body", []):
+                walk(child, depth + 1)
+        else:
+            # Record line count at current depth
+            line_count = line_stats.get(node.line)
+            if line_count and line_count.execution_count > 0:
+                depth_counts[depth] = max(
+                    depth_counts.get(depth, 0), line_count.execution_count
+                )
+            # Transparent: pass depth unchanged
+            for child in vars(node).values():
+                if isinstance(child, ASTNode):
+                    walk(child, depth)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, ASTNode):
+                            walk(item, depth)
+
+    walk(ast, 0)
+    return depth_counts
+
+
+def _infer_complexity_from_depth_counts(
+    depth_counts: Dict[int, int],
+    max_loop_depth: int,
+) -> Tuple[str, float]:
+    """
+    Infer complexity from depth-to-execution-count mapping.
+
+    Uses ratios between depths to determine algorithmic complexity.
+    """
+    if not depth_counts:
+        return COMPLEXITY_O1, 0.95
+
+    max_active_depth = max(depth_counts.keys()) if depth_counts else 0
+    max_count = max(depth_counts.values()) if depth_counts else 0
+
+    # No loops executed
+    if max_active_depth == 0 or max_count <= 1:
+        return COMPLEXITY_O1, 0.95
+
+    # Nested loops: check ratios
+    if max_active_depth >= 3:
+        return COMPLEXITY_NK, 0.85
+    elif max_active_depth == 2:
+        d1 = depth_counts.get(1, 1)
+        d2 = depth_counts.get(2, 1)
+        if d2 >= d1 * 2:
+            return COMPLEXITY_N2, 0.88
+        elif d2 >= d1:
+            return COMPLEXITY_N2, 0.80
+        else:
+            return COMPLEXITY_N, 0.75
+    elif max_active_depth == 1:
+        # Single loop: check for constant inner (linear) vs logarithmic
+        d0 = depth_counts.get(0, 1)
+        d1 = depth_counts.get(1, 1)
+        if d1 <= d0 * 10 and max_count <= 20:
+            # Small count, single loop - could be log n or linear
+            return COMPLEXITY_N, 0.70
+        else:
+            return COMPLEXITY_N, 0.75
+
+    return COMPLEXITY_N, 0.70
+
+
+def _detect_recursion_and_complexity(
+    ast: Optional["ASTNode"],
+    line_stats: Dict[int, "LineStats"],
+) -> Tuple[Optional[str], float]:
+    """
+    Detect recursion and calculate complexity based on accumulated work.
+
+    Returns:
+        Tuple of (complexity, confidence) or (None, 0) if no recursion detected
+    """
+    if ast is None:
+        return None, 0
+
+    from .ast_nodes import FunctionDefNode, FunctionCallNode
+
+    # Find all function definitions
+    functions: Dict[str, "FunctionDefNode"] = {}
+
+    def find_functions(node: "ASTNode") -> None:
+        if isinstance(node, FunctionDefNode):
+            # Get the name attribute which is an IdentifierNode
+            name_node = getattr(node, "name", None)
+            if name_node is not None:
+                func_name = getattr(name_node, "name", "")
+                if func_name:
+                    functions[func_name] = node
+        for child in vars(node).values():
+            if isinstance(child, ASTNode):
+                find_functions(child)
+            elif isinstance(child, list):
+                for item in child:
+                    if isinstance(item, ASTNode):
+                        find_functions(item)
+
+    find_functions(ast)
+
+    if not functions:
+        return None, 0
+
+    # Check for self-recursion in each function
+    for func_name, func_def in functions.items():
+        body = getattr(func_def, "body", [])
+        call_count = 0  # Count of recursive calls to this function
+
+        def find_calls(node: "ASTNode") -> None:
+            nonlocal call_count
+            if isinstance(node, FunctionCallNode):
+                # Get function name - it might be in 'function'
+                # attribute as IdentifierNode
+                func_ident = getattr(node, "function", None)
+                if func_ident is not None:
+                    call_name = getattr(func_ident, "name", "")
+                    if call_name == func_name:
+                        call_count += 1
+            for child in vars(node).values():
+                if isinstance(child, ASTNode):
+                    find_calls(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, ASTNode):
+                            find_calls(item)
+
+        for stmt in body:
+            find_calls(stmt)
+
+        # If this function calls itself recursively
+        if call_count > 0:
+            # Single recursive call → O(n) (e.g., tail recursion or linear recursion)
+            # Multiple recursive calls (branching) → O(2^n) (e.g., fibonacci)
+            if call_count >= 2:
+                return COMPLEXITY_EXP, 0.90
+            return COMPLEXITY_N, 0.85
+
+    return None, 0
+
+
+def _analyze_nested_loops(ast: Optional["ASTNode"]) -> Optional[str]:
+    """
+    Analyze nested loops to detect complexity like O(n log n).
+
+    Returns:
+        - "nlogn": nested loops where outer is O(n) and inner is O(log n)
+        - "n2": nested loops where both are O(n) or similar
+        - None: not a clear nested loop pattern
+    """
+    if ast is None:
+        return None
+
+    from .ast_nodes import ForNode, WhileNode, AssignmentNode, IdentifierNode
+
+    loop_info: List[Tuple[int, str, "ASTNode"]] = []  # (depth, pattern, node)
+
+    def walk(node: "ASTNode", depth: int) -> None:
+        if isinstance(node, (ForNode, WhileNode)):
+            # Determine if this loop is O(n) or O(log n)
+            pattern = "linear"  # default
+            body = getattr(node, "body", [])
+
+            # Check for halving pattern inside the loop
+            for stmt in body:
+                if isinstance(stmt, AssignmentNode):
+                    rhs = getattr(stmt, "value", None)
+                    if rhs is not None:
+                        from .ast_nodes import BinaryOpNode
+
+                        if isinstance(rhs, BinaryOpNode):
+                            op = getattr(rhs, "operator", None)
+                            left = getattr(rhs, "left", None)
+                            target = getattr(stmt, "target", None)
+
+                            # Check for var //= const pattern
+                            if op == "//":
+                                if isinstance(left, IdentifierNode) and isinstance(
+                                    target, IdentifierNode
+                                ):
+                                    if getattr(left, "name", "") == getattr(
+                                        target, "name", ""
+                                    ):
+                                        pattern = "log"
+
+            loop_info.append((depth + 1, pattern, node))
+            for child in body:
+                walk(child, depth + 1)
+        else:
+            for child in vars(node).values():
+                if isinstance(child, ASTNode):
+                    walk(child, depth)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, ASTNode):
+                            walk(item, depth)
+
+    walk(ast, 0)
+
+    # Analyze nested loops
+    if len(loop_info) >= 2:
+        # Check if we have two levels of nesting
+        max_depth = max(d for d, _, _ in loop_info) if loop_info else 0
+        if max_depth >= 2:
+            # Get patterns at different depths
+            depth_patterns: Dict[int, str] = {}
+            for depth, pattern, _ in loop_info:
+                if depth not in depth_patterns:
+                    depth_patterns[depth] = pattern
+
+            # If outer is linear and inner is log, it's O(n log n)
+            if 1 in depth_patterns and 2 in depth_patterns:
+                if depth_patterns[1] == "linear" and depth_patterns[2] == "log":
+                    return "nlogn"
+                elif depth_patterns[1] == "linear" and depth_patterns[2] == "linear":
+                    # Check for depth 3 with log pattern → O(n² log n)
+                    if 3 in depth_patterns and depth_patterns[3] == "log":
+                        return "n2logn"
+                    return "n2"
+
+    return None
+
+
+def _detect_algorithm_pattern(node: Optional["ASTNode"]) -> Optional[str]:
+    """
+    Detect specific algorithmic patterns from AST structure.
+
+    Returns:
+        - "binary_search": while loop with left/right/mid pattern
+        - "binary_exponentiation": while loop with variable //= 2 pattern
+        - "nested_loop": multiple nested loops at depth 2+
+        - "single_loop": one loop at depth 1
+        - None: unknown
+    """
+    if node is None:
+        return None
+
+    # Count loops at each depth and find first loop for pattern matching
+    loop_depths = []
+    first_loop = None
+
+    def walk(n: Optional["ASTNode"], depth: int) -> None:
+        nonlocal first_loop
+        if n is None:
+            return
+        if isinstance(n, (ForNode, WhileNode)):
+            loop_depths.append(depth + 1)
+            if first_loop is None:
+                first_loop = n
+            for child in getattr(n, "body", []):
+                walk(child, depth + 1)
+        else:
+            for child in vars(n).values():
+                if isinstance(child, ASTNode):
+                    walk(child, depth)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, ASTNode):
+                            walk(item, depth)
+
+    walk(node, 0)
+    max_depth = max(loop_depths) if loop_depths else 0
+
+    if max_depth == 0:
+        return None
+
+    if max_depth >= 2:
+        return "nested_loop"
+
+    # Single loop - check for patterns
+    if first_loop is not None and isinstance(first_loop, WhileNode):
+        # Check for O(log n) patterns: halving/reducing each iteration
+        for stmt in getattr(first_loop, "body", []):
+            if isinstance(stmt, AugmentedAssignmentNode):
+                target = getattr(stmt, "target", None)
+                operator = getattr(stmt, "operator", None)
+                # Binary exponentiation: b //= 2
+                if target is not None and operator == "//=":
+                    return "binary_exponentiation"
+                # GCD (Euclid): b %= a
+                if target is not None and operator == "%=":
+                    return "euclidean_gcd"
+
+            # Check for regular assignment with // like b = b // 2
+            if isinstance(stmt, AssignmentNode):
+                rhs = getattr(stmt, "value", None)
+                target_name = getattr(stmt, "target", None)
+
+                if isinstance(rhs, BinaryOpNode):
+                    op = getattr(rhs, "operator", None)
+                    left = getattr(rhs, "left", None)
+                    right = getattr(rhs, "right", None)
+
+                    # Binary exponentiation: b = b // 2
+                    if op == "//" and left is not None and right is not None:
+                        if isinstance(left, IdentifierNode) and isinstance(
+                            target_name, IdentifierNode
+                        ):
+                            if getattr(left, "name", "") == getattr(
+                                target_name, "name", ""
+                            ):
+                                return "binary_exponentiation"
+
+                    # Euclid GCD: b = a % b pattern
+                    if op == "%" and left is not None and right is not None:
+                        # Check if target appears on RHS (b = a % b)
+                        if isinstance(right, IdentifierNode) and isinstance(
+                            target_name, IdentifierNode
+                        ):
+                            if getattr(right, "name", "") == getattr(
+                                target_name, "name", ""
+                            ):
+                                return "euclidean_gcd"
+
+        # Legacy binary search detection (for programs using mid = (l+r)//2)
+        for stmt in getattr(first_loop, "body", []):
+            if isinstance(stmt, AssignmentNode):
+                rhs = getattr(stmt, "value", None)
+                if isinstance(rhs, BinaryOpNode):
+                    op = getattr(rhs, "operator", None)
+                    if op == "//":
+                        return "binary_search"
+
+    return "single_loop"
 
 
 def detect_complexity_with_confidence(
     line_stats: Dict[int, LineStats],
-    max_loop_depth: int = 1,
+    max_loop_depth: int = 0,
+    ast: Optional["ASTNode"] = None,
 ) -> Tuple[str, float]:
     """
-    Return complexity class and heuristic confidence score.
+    Return complexity class using AST + profiling data.
 
-    Confidence is a rough indicator [0.0, 1.0], not a statistical guarantee.
+    Priority:
+    1. Recursion → O(n) (accumulated work)
+    2. Nested loops with mixed patterns → O(n log n)
+    3. AST depth >= 2 → use depth counts for accurate complexity
+    4. AST depth == 1 → check for O(log n) patterns (binary search/exponentiation)
+    5. No AST → fallback to count-based heuristics
+
+    Confidence is highest when we have both AST structure and runtime data.
     """
     if not line_stats:
-        return "O(1)", 0.95
+        return COMPLEXITY_O1, 0.95
 
     counts = [s.execution_count for s in line_stats.values()]
     max_count = max(counts)
-    unique_lines = len(line_stats)
-    total_executions = sum(counts)
 
+    # Compute loop depth from AST if provided
+    if ast is not None:
+        max_loop_depth = _get_max_loop_depth_from_ast(ast)
+
+    # Check for recursion first
+    if ast is not None:
+        recurse_complexity, recurse_conf = _detect_recursion_and_complexity(
+            ast, line_stats
+        )
+        if recurse_complexity is not None:
+            return recurse_complexity, recurse_conf
+
+    # Check for nested loops with different complexity patterns
+    # (O(n log n), O(n² log n))
+    if ast is not None:
+        nested_pattern = _analyze_nested_loops(ast)
+        if nested_pattern == "nlogn":
+            return COMPLEXITY_NLOGN, 0.85
+        elif nested_pattern == "n2logn":
+            return COMPLEXITY_N2LOGN, 0.85
+        elif nested_pattern == "n2":
+            return COMPLEXITY_N2, 0.85
+
+    # Use AST loop depth as primary signal (even if max_count is 1)
     if max_loop_depth >= 3:
-        pass
+        return COMPLEXITY_NK, 0.90
     elif max_loop_depth == 2:
-        if max_count > 3:
-            return "O(n^2)", 0.80
+        # For depth 2, check if inner loop is O(log n) pattern
+        if ast is not None:
+            nested_pattern = _analyze_nested_loops(ast)
+            if nested_pattern == "nlogn":
+                return COMPLEXITY_NLOGN, 0.85
+        return COMPLEXITY_N2, 0.85
+    elif max_loop_depth == 1:
+        # Single loop - check for O(log n) patterns
+        algo_pattern = _detect_algorithm_pattern(ast) if ast else None
+        if algo_pattern in ("binary_search", "binary_exponentiation", "euclidean_gcd"):
+            return COMPLEXITY_LOGN, 0.90
 
+        # Disambiguate using pattern analysis
+        pattern_analysis = _analyze_execution_pattern(line_stats)
+        pattern = pattern_analysis["pattern"]
+
+        if pattern == "log":
+            return COMPLEXITY_LOGN, 0.75
+        else:
+            return COMPLEXITY_N, 0.80
+
+    # No loops in AST: check if truly constant (max_count <= 1)
     if max_count <= 1:
-        return "O(1)", 0.95
-    if max_count <= 15:
-        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
-        if not active_stats:
-            return "O(1)", 0.95
-        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
-        if hot_line_count == 1:
-            sqrt_max = math.isqrt(max_count)
-            is_perfect_square = (sqrt_max * sqrt_max == max_count) and sqrt_max > 1
-            non_hot_counts = [
-                s.execution_count
-                for s in active_stats
-                if 1 < s.execution_count < max_count
-            ]
-            has_divisor_pattern = any(max_count % c == 0 for c in non_hot_counts)
-            if is_perfect_square or has_divisor_pattern:
-                return "O(n^2)", 0.50
-            all_other_once = all(
-                s.execution_count == 1
-                for s in active_stats
-                if s.execution_count < max_count
-            )
-            if all_other_once and max_count > 3:
-                return "O(n)", 0.50
-            else:
-                return "O(log n)", 0.55
-        non_max_counts = [
-            s.execution_count for s in active_stats if 1 < s.execution_count < max_count
-        ]
-        has_outer = len(non_max_counts) > 0
-        if has_outer:
-            return "O(n^2)", 0.50
-        else:
-            return "O(n)", 0.55
-    elif max_count <= 1_000:
-        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
+        return COMPLEXITY_O1, 0.95
 
-        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
+    # Use count-based heuristics for programs with no loops
+    pattern_analysis = _analyze_execution_pattern(line_stats)
+    pattern = pattern_analysis["pattern"]
 
-        all_others_once = all(
-            s.execution_count == 1
-            for s in active_stats
-            if s.execution_count < max_count
-        )
+    # Pattern overrides count thresholds when we have clear signal
+    if pattern == "log":
+        return COMPLEXITY_LOGN, 0.75
+    elif pattern == "nlogn":
+        return COMPLEXITY_NLOGN, 0.70
+    elif pattern == "quadratic":
+        return COMPLEXITY_N2, 0.55  # Low confidence - can't confirm without AST
+    elif pattern == "linear":
+        return COMPLEXITY_N, 0.60
 
-        if hot_line_count == 1 and all_others_once:
-            complexity = "O(n)"
-            base_confidence = 0.70
-
-        elif hot_line_count >= 2:
-            non_max_counts = [
-                s.execution_count
-                for s in active_stats
-                if 1 < s.execution_count < max_count
-            ]
-            if non_max_counts:
-                complexity = "O(n^2)"
-                base_confidence = 0.75
-            elif _detect_nested_structure(max_count):
-                complexity = "O(n^2)"
-                base_confidence = 0.65
-            else:
-                complexity = "O(n)"
-                base_confidence = 0.70
-
-        else:
-            intermediate_counts = [
-                s.execution_count
-                for s in active_stats
-                if 1 < s.execution_count < max_count
-            ]
-            sqrt_max = math.isqrt(max_count)
-            has_significant_outer = any(c > sqrt_max for c in intermediate_counts)
-            if has_significant_outer and _detect_nested_structure(max_count):
-                complexity = "O(n^2)"
-                base_confidence = 0.70
-            else:
-                complexity = "O(n)"
-                base_confidence = 0.70
-    elif max_count <= 10_000:
-        active_stats = [s for s in line_stats.values() if s.execution_count > 0]
-
-        hot_line_count = sum(1 for s in active_stats if s.execution_count >= max_count)
-
-        all_others_once = all(
-            s.execution_count == 1
-            for s in active_stats
-            if s.execution_count < max_count
-        )
-
-        if hot_line_count == len(active_stats) and hot_line_count > 5:
-            complexity = "O(n log n)"
-            base_confidence = 0.65
-
-        elif hot_line_count == 1 and all_others_once:
-            sqrt_val = math.isqrt(max_count)
-            is_perfect_square = sqrt_val * sqrt_val == max_count and sqrt_val > 1
-            cbrt_val = round(max_count ** (1 / 3))
-            is_perfect_cube = any(
-                c > 1 and c * c * c == max_count
-                for c in [cbrt_val - 1, cbrt_val, cbrt_val + 1]
-            )
-            if is_perfect_square or is_perfect_cube:
-                complexity = "O(n^2)"
-                base_confidence = 0.60
-            else:
-                complexity = "O(n)"
-                base_confidence = 0.70
-
-        elif hot_line_count >= 2:
-            non_max_counts = [
-                s.execution_count
-                for s in active_stats
-                if 1 < s.execution_count < max_count
-            ]
-            if non_max_counts:
-                complexity = "O(n^2)"
-                base_confidence = 0.75
-            elif _detect_nested_structure(max_count):
-                complexity = "O(n^2)"
-                base_confidence = 0.65
-            else:
-                complexity = "O(n)"
-                base_confidence = 0.70
-
-        else:
-            intermediate_counts = [
-                s.execution_count
-                for s in active_stats
-                if 1 < s.execution_count < max_count
-            ]
-            sqrt_max = math.isqrt(max_count)
-            has_significant_outer = any(c > sqrt_max for c in intermediate_counts)
-            if has_significant_outer and _detect_nested_structure(max_count):
-                complexity = "O(n^2)"
-                base_confidence = 0.70
-            else:
-                complexity = "O(n log n)"
-                base_confidence = 0.65
-    elif max_count <= 1_000_000:
-        complexity = "O(n^2)"
-        base_confidence = 0.8
-    else:
-        complexity = "O(n^3) or worse"
-        base_confidence = 0.85
-
-    dominance = max_count / max(total_executions, 1)
-    if dominance > 0.8:
-        base_confidence += 0.1
-    elif dominance < 0.3:
-        base_confidence -= 0.1
-
-    if unique_lines <= 2:
-        base_confidence += 0.05
-
-    confidence = min(0.99, max(0.05, base_confidence))
-    return complexity, confidence
+    # Fallback for ambiguous patterns: default to O(n) with low confidence
+    # We CANNOT determine O(n) vs O(n²) from counts alone without AST
+    return COMPLEXITY_N, 0.50
 
 
 def detect_complexity(line_stats: Dict[int, LineStats]) -> str:
@@ -519,7 +937,7 @@ def detect_complexity(line_stats: Dict[int, LineStats]) -> str:
         O(log n)     - Max count 2-15, suggests binary-search style
         O(n)         - Max count up to 1,000
         O(n log n)   - Max count suggests a sorting-style pattern
-        O(n^2)       - Max count suggests nested loops
+        O(n²)       - Max count suggests nested loops
         O(n^3)+      - Very high execution counts
 
     Args:
@@ -528,7 +946,7 @@ def detect_complexity(line_stats: Dict[int, LineStats]) -> str:
     Returns:
         A string representing the estimated complexity class
     """
-    complexity, _confidence = detect_complexity_with_confidence(line_stats)
+    complexity, _confidence = detect_complexity_with_confidence(line_stats, ast=None)
     return complexity
 
 
@@ -577,7 +995,7 @@ class Profiler:
         """Begin a profiling session. Call this before any code executes."""
         self.data.start_time = time.perf_counter()
 
-    def stop(self, max_loop_depth: int = 1) -> None:
+    def stop(self, max_loop_depth: int = 0, ast: Optional["ASTNode"] = None) -> None:
         """
         End the profiling session and compute final aggregates.
 
@@ -596,6 +1014,7 @@ class Profiler:
         complexity, confidence = detect_complexity_with_confidence(
             self.data.line_stats,
             max_loop_depth=max_loop_depth,
+            ast=ast,
         )
         sampling_rate = self.config.normalized_sampling_rate()
         sampling_adjusted_confidence = confidence * (0.5 + (0.5 * sampling_rate))

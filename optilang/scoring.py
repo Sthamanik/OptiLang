@@ -99,6 +99,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .constants import COMPLEXITY_POINTS
+
 # ---------------------------------------------------------------------------
 # Pattern classification
 # ---------------------------------------------------------------------------
@@ -138,18 +140,10 @@ MAINTAINABILITY_PATTERNS = frozenset(
 
 # ---------------------------------------------------------------------------
 # Complexity class → sub-score mapping (out of 15)
+# Imported from constants.py to ensure consistency with profiler.py
 # ---------------------------------------------------------------------------
 
-COMPLEXITY_POINTS: Dict[str, float] = {
-    "O(1)": 15.0,
-    "O(log n)": 15.0,
-    "O(n)": 13.0,
-    "O(n log n)": 10.0,
-    "O(n²)": 6.0,
-    "O(n³)": 3.0,
-    "O(n^k)": 1.0,
-    "O(2^n)": 0.0,
-}
+# COMPLEXITY_POINTS is imported from .constants
 
 # ---------------------------------------------------------------------------
 # Density → score: linear-interpolation anchor points
@@ -294,67 +288,28 @@ def _detect_complexity(line_stats: Dict[str, Any]) -> str:
     """
     Heuristic Big-O detection from a single execution trace.
 
-    Reads execution counts from profiling line_stats and returns a
-    standard complexity class string.
+    Delegates to profiler's detect_complexity_with_confidence for accurate,
+    ratio-based detection. Returns only the complexity class string.
 
     Returns one of:
         "O(1)", "O(log n)", "O(n)", "O(n log n)",
-        "O(n²)", "O(n³)", "O(n^k)", "O(2^n)"
+        "O(n²)", "O(n³)", "O(n^k)", "O(2^n)", "O(n^3) or worse"
     """
-    if not line_stats:
-        return "O(1)"
+    # Convert dict format from scoring to profiler format
+    from .profiler import LineStats, detect_complexity_with_confidence
 
-    execution_counts: List[int] = [int(s.get("count", 0)) for s in line_stats.values()]
-    lines_profiled = len(execution_counts)
-    max_c = max(execution_counts) if execution_counts else 0
+    profiler_stats: Dict[int, LineStats] = {}
+    for line_num, stats in line_stats.items():
+        count = int(stats.get("count", 0))
+        profiler_stats[int(line_num)] = LineStats(
+            line_number=int(line_num),
+            execution_count=count,
+            total_time_ms=0.0,
+            avg_time_ms=0.0,
+        )
 
-    if max_c == 0:
-        return "O(1)"
-
-    HOT_RATIO = 0.5
-    hot_counts = [c for c in execution_counts if c >= max_c * HOT_RATIO]
-    non_hot = [c for c in execution_counts if c < max_c * HOT_RATIO]
-    cluster_size = len(hot_counts)
-
-    sqrt_max = math.sqrt(max_c)
-    max_non_hot = max(non_hot) if non_hot else 0
-    has_outer_loop = max_non_hot > sqrt_max * 0.5
-
-    n = max(max_c, lines_profiled, MIN_N)
-
-    if not has_outer_loop:
-        return _classify_linear_or_below(max_c, n)
-
-    if _is_exponential(max_c, n):
-        return "O(2^n)"
-
-    if cluster_size <= 2:
-        return "O(n²)"
-    elif cluster_size == 3:
-        return "O(n³)"
-    else:
-        return "O(n^k)"
-
-
-def _classify_linear_or_below(max_c: int, n: int) -> str:
-    log_n = math.log2(n)
-    if max_c <= 1:
-        return "O(1)"
-    if max_c <= log_n * 2:
-        return "O(log n)"
-    if max_c <= n * 2:
-        return "O(n)"
-    if max_c <= n * log_n * 3:
-        return "O(n log n)"
-    return "O(n²)"
-
-
-def _is_exponential(max_c: int, n: int) -> bool:
-    if max_c < EXPONENTIAL_COUNT_THRESHOLD:
-        return False
-    if n > 60:
-        return False
-    return bool(max_c >= (2**n) * 0.5)
+    complexity, _confidence = detect_complexity_with_confidence(profiler_stats)
+    return complexity
 
 
 # ---------------------------------------------------------------------------

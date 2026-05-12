@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from .ast_nodes import (
     ASTNode,
     AssignmentNode,
+    IndexAssignmentNode,
     AugmentedAssignmentNode,
     BinaryOpNode,
     BooleanNode,
@@ -187,7 +188,11 @@ class UserFunction:
             frame.define(param.name, arg)
 
         if executor.profiler is not None:
-            executor.profiler.start_function_call(self.name)
+            caller_name = None
+            call_stack = executor.profiler.get_call_stack()
+            if call_stack:
+                caller_name = call_stack[-1]
+            executor.profiler.start_function_call(self.name, caller=caller_name)
 
         try:
             # pylint: disable=protected-access
@@ -255,6 +260,8 @@ class Executor:
         """
         self._start_time = time.perf_counter()
         self._output = []
+        self._loop_depth = 0
+        self._max_loop_depth_seen = 0
         errors: List[str] = []
 
         if self.profiler is not None:
@@ -268,7 +275,10 @@ class Executor:
             errors.append(f"Runtime error: {exc}")
         finally:
             if self.profiler is not None:
-                self.profiler.stop()
+                self.profiler.stop(
+                    max_loop_depth=self._max_loop_depth_seen,
+                    ast=program,
+                )
 
         elapsed = time.perf_counter() - self._start_time
         profiling_data: Optional[ProfilingData] = (
@@ -281,6 +291,7 @@ class Executor:
             execution_time=elapsed,
             profiling=profiling_data,
             symbol_table=self.get_symbol_table(include_builtins=False),
+            ast=program,
         )
 
     def _install_builtins(self) -> None:
@@ -335,6 +346,37 @@ class Executor:
         if isinstance(node, AssignmentNode):
             value = self._eval(node.value, env)
             env.assign(node.target.name, value)
+
+        elif isinstance(node, IndexAssignmentNode):
+            # Evaluate target (IndexNode) to get the list and index
+            collection = self._eval(node.target.collection, env)
+            index = self._eval(node.target.index, env)
+            value = self._eval(node.value, env)
+
+            # Perform indexed assignment
+            if isinstance(collection, list):
+                if not isinstance(index, int):
+                    raise OptiTypeError(
+                        "list indices must be integers",
+                        getattr(node.target, "line", None),
+                    )
+                if index < 0:
+                    index = len(collection) + index
+                if index < 0 or index >= len(collection):
+                    raise OptiIndexError(
+                        int(index),
+                        len(collection),
+                        getattr(node.target, "line", None),
+                    )
+                collection[index] = value
+            elif isinstance(collection, dict):
+                collection[index] = value
+            else:
+                raise OptiTypeError(
+                    f"'{type(collection).__name__}' object does not "
+                    f"support item assignment",
+                    getattr(node.target, "line", None),
+                )
 
         elif isinstance(node, AugmentedAssignmentNode):
             current = env.get(node.target.name, node.target)
@@ -561,6 +603,16 @@ class Executor:
             if value == 0:
                 raise OptiZeroDivisionError(node.line)
             return current / value
+        if operator == "//=":
+            if value == 0:
+                raise OptiZeroDivisionError(node.line)
+            return current // value
+        if operator == "%=":
+            if value == 0:
+                raise OptiZeroDivisionError(node.line)
+            return current % value
+        if operator == "**=":
+            return current**value
         raise OptiRuntimeError(f"Unsupported augmented operator: {operator}", node.line)
 
     def _call(self, callee: Any, args: List[Any], node: FunctionCallNode) -> Any:

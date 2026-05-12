@@ -277,66 +277,74 @@ def _run_pipeline(source: str) -> DemoReport:
         optimizer_note=optimizer_note,
     )
 
-
-# Program 1 — Perfect: simple O(1) code, no issues
-
 PROGRAM_1 = """\
-def greet(name):
-    message = "Hello, " + name
-    return message
+# O(1) — Constant Assignment
 
-result = greet("OptiLang")
+x = 10
+y = 20
+
+result = x + y
+
 print(result)
 """
-
-# Program 2 — Linear loop: O(n) efficiency, minor style suggestions
 
 PROGRAM_2 = """\
-def sum_range(n):
-    total = 0
-    for i in range(n):
-        total += i
-    return total
+# O(1) — Function Call
 
-unused_var = 999
-result = sum_range(100)
-print(result)
+def greet(name):
+    return "Hello, " + name
+
+message = greet("OptiLang")
+
+print(message)
 """
-
-# Program 3 — Nested loops: O(n²) complexity, quality and maintainability issues
 
 PROGRAM_3 = """\
-result = 0
-for i in range(50):
-    for j in range(50):
-        scale = 50 * 3
-        result += i + j + scale
-print(result)
-"""
+# O(log n) — Halving Loop
 
-# Program 4 — Broken code: runtime error, dead code, unused variables
+n = 1024
+steps = 0
+
+while n > 1:
+    n = n // 2
+    steps += 1
+
+print(steps)
+"""
 
 PROGRAM_4 = """\
-def divide(a, b):
-    return a / b
-    leftover = 99
+# O(log n) — Euclidean GCD
 
-unused_var = 42
-answer = divide(10, 0)
-print(answer)
+def gcd(a, b):
+    while b != 0:
+        a, b = b, a % b
+
+    return a
+
+print(gcd(48, 18))
 """
 
-# Program 5 — Complex code: nested loops with multiple operations, moderate complexity o(n2)
-PROGRAM_5 = """
-numbers = [1, 2, 3]
+PROGRAM_5 = """\
+# O(log n) — Fast Exponentiation
 
-for i in numbers:
-    for j in numbers:
-        print(i, j)
+def fast_power(a, b):
+    result = 1
+
+    while b > 0:
+        if b % 2 == 1:
+            result *= a
+
+        a *= a
+        b = b // 2
+
+    return result
+
+print(fast_power(2, 10))
 """
 
-# Program 6 — Simple loop: O(n) efficiency, straightforward code, no issues
-PROGRAM_6 = """
+PROGRAM_6 = """\
+# O(n) — Linear Traversal
+
 numbers = [1, 2, 3, 4, 5]
 
 total = 0
@@ -347,16 +355,81 @@ for num in numbers:
 print(total)
 """
 
+PROGRAM_7 = """\
+# O(n) — Maximum Search
+
+numbers = [5, 2, 9, 1, 7]
+
+maximum = numbers[0]
+
+for num in numbers:
+    if num > maximum:
+        maximum = num
+
+print(maximum)
+"""
+
+PROGRAM_8 = """\
+# O(n) — String Concatenation
+
+words = ["Opti", "Lang", "Demo"]
+
+result = ""
+
+for word in words:
+    result += word
+
+print(result)
+"""
+
+PROGRAM_9 = """\
+# O(n log n) — Nested Logarithmic Loop
+
+for i in range(100):
+    j = 100
+
+    while j > 1:
+        j = j // 2
+        print(i, j)
+"""
+
+PROGRAM_10 = """\
+# O(n²) — Nested Loops
+
+numbers = [1, 2, 3, 4]
+
+for i in numbers:
+    for j in numbers:
+        print(i, j)
+"""
+
+PROGRAM_11 = """\
+for i in range(50):
+    for j in range(50):
+        k = 100
+
+        while k > 1:
+            print(i, j, k)
+            k = k // 2
+
+"""
+
+
 # Main
 
 if __name__ == "__main__":
     programs = [
-        ("Program 1 — Perfect", PROGRAM_1),
-        ("Program 2 — Linear Loop", PROGRAM_2),
-        ("Program 3 — Nested Loops", PROGRAM_3),
-        ("Program 4 — Broken Code", PROGRAM_4),
-        ("Program 5 — Complex Code", PROGRAM_5),
-        ("Program 6 — Simple Loop", PROGRAM_6),
+        # ("Program 1 — Constant Assignment", PROGRAM_1),
+        # ("Program 2 — Function Call", PROGRAM_2),
+        # ("Program 3 — Halving Loop", PROGRAM_3),
+        # # ("Program 4 — Euclidean GCD", PROGRAM_4),
+        # ("Program 5 — Fast Exponentiation", PROGRAM_5),
+        # ("Program 6 — Linear Traversal", PROGRAM_6),
+        # ("Program 7 — Maximum Search", PROGRAM_7),
+        # ("Program 8 — String Concatenation", PROGRAM_8),
+        # ("Program 9 — Nested Logarithmic Loop", PROGRAM_9),
+        # ("Program 10 — Nested Loops", PROGRAM_10),
+        ("Program 11 — Bubble Sort", PROGRAM_11),
     ]
 
     print()

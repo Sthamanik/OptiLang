@@ -62,6 +62,9 @@ from .ast_nodes import (
 )
 from .models import OptimizationReport, Suggestion
 from .profiler import ProfilingData
+import logging
+
+_log = logging.getLogger(__name__)
 
 # Tunable constants
 LOOP_COUNT_THRESHOLD: int = 20
@@ -1125,8 +1128,13 @@ class Optimizer:
                 all_suggestions.extend(
                     detector(self._ast, self._profiling, self._symbol_table)
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning(
+                    "Detector %s failed: %s",
+                    detector.__name__,
+                    exc,
+                    exc_info=True,
+                )
         all_suggestions.sort(key=lambda s: s.impact_score, reverse=True)
         return OptimizationReport(suggestions=all_suggestions)
 
@@ -1182,9 +1190,9 @@ def analyze_source(source: str) -> OptimizationReport:
             print(f"Line {s.line} [{s.severity}]: {s.description}")
     """
     from .executor import execute as _execute
-    from .lexer import tokenize as _tokenize
-    from .parser import parse as _parse
 
     result = _execute(source)
-    ast = _parse(_tokenize(source))
+    ast = result.ast
+    if ast is None:
+        return OptimizationReport(suggestions=[])
     return analyze(ast, result.profiling, result.symbol_table)

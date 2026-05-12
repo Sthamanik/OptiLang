@@ -11,7 +11,10 @@ Pipeline overview:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from .ast_nodes import ProgramNode
 
 from .profiler import ProfilingData
 
@@ -25,6 +28,7 @@ class ExecutionResult:
     execution_time: float = 0.0
     profiling: Optional[ProfilingData] = None
     symbol_table: Dict[str, Any] = field(default_factory=dict)
+    ast: Optional["ProgramNode"] = None  # parsed AST for reuse by optimizer
 
 
 @dataclass

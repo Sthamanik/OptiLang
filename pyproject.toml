@@ -58,7 +58,7 @@ addopts = "-v --cov=optilang --cov-report=html --cov-report=term"
 
 [tool.black]
 line-length = 88
-target-version = ['py314']
+target-version = ['py312']
 include = '\.pyi?$'
 
 [tool.mypy]

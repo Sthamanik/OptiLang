@@ -84,7 +84,10 @@ class LexerState(Enum):
     SAW_PLUS = auto()  # '+'  → could be '+=' or '+'
     SAW_MINUS = auto()  # '-'  → could be '-=' or '-'
     SAW_STAR = auto()  # '*'  → could be '**', '*=', or '*'
-    SAW_SLASH = auto()  # '/'  → could be '//', '/=', or '/'
+    SAW_STAR_STAR = auto()  # '**' → could be '**=' or '**'
+    SAW_SLASH = auto()  # '/'  → could be '//', '//=', '/=', or '/'
+    SAW_SLASH_SLASH = auto()  # '//' → could be '//=' or '//'
+    SAW_PERCENT = auto()  # '%'  → could be '%=' or '%'
 
     # ── Indentation handling ─────────────────
     IN_INDENT = auto()  # counting spaces/tabs at line start
@@ -302,8 +305,11 @@ class Lexer:
                 ",": TokenType.COMMA,
                 ":": TokenType.COLON,
                 ".": TokenType.DOT,
-                "%": TokenType.MODULO,
             }
+            if ch == "%":
+                self._buffer += ch
+                self._advance()
+                return LexerState.SAW_PERCENT
             if ch in single:
                 self._advance()
                 self._emit(single[ch], ch)
@@ -514,11 +520,11 @@ class Lexer:
             self._reset()
             return LexerState.START
 
-        # SAW_STAR: already buffered '*' — could be '**', '*=', or '*'
+        # SAW_STAR: already buffered '*' — could be '**', '**=', '*=', or '*'
         if state == LexerState.SAW_STAR:
             if ch == "*":
                 self._advance()
-                self._emit(TokenType.POWER, "**")
+                return LexerState.SAW_STAR_STAR
             elif ch == "=":
                 self._advance()
                 self._emit(TokenType.MULTIPLY_ASSIGN, "*=")
@@ -527,16 +533,46 @@ class Lexer:
             self._reset()
             return LexerState.START
 
-        # SAW_SLASH: already buffered '/' — could be '//', '/=', or '/'
+        # SAW_STAR_STAR: already buffered '**' — could be '**=' or '**'
+        if state == LexerState.SAW_STAR_STAR:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.POWER_ASSIGN, "**=")
+            else:
+                self._emit(TokenType.POWER, "**")
+            self._reset()
+            return LexerState.START
+
+        # SAW_SLASH: already buffered '/' — could be '//', '//=', '/=', or '/'
         if state == LexerState.SAW_SLASH:
             if ch == "/":
                 self._advance()
-                self._emit(TokenType.FLOOR_DIVIDE, "//")
+                return LexerState.SAW_SLASH_SLASH
             elif ch == "=":
                 self._advance()
                 self._emit(TokenType.DIVIDE_ASSIGN, "/=")
             else:
                 self._emit(TokenType.DIVIDE, "/")
+            self._reset()
+            return LexerState.START
+
+        # SAW_SLASH_SLASH: already buffered '//' — could be '//=' or '//'
+        if state == LexerState.SAW_SLASH_SLASH:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.FLOOR_DIVIDE_ASSIGN, "//=")
+            else:
+                self._emit(TokenType.FLOOR_DIVIDE, "//")
+            self._reset()
+            return LexerState.START
+
+        # SAW_PERCENT: already buffered '%' — could be '%=' or '%'
+        if state == LexerState.SAW_PERCENT:
+            if ch == "=":
+                self._advance()
+                self._emit(TokenType.MODULO_ASSIGN, "%=")
+            else:
+                self._emit(TokenType.MODULO, "%")
             self._reset()
             return LexerState.START
 

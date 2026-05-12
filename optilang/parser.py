@@ -13,7 +13,8 @@ Grammar (Simplified):
 
     assignment      → IDENTIFIER ASSIGN expression
     aug_assignment  → IDENTIFIER (PLUS_ASSIGN | MINUS_ASSIGN | MULTIPLY_ASSIGN |
-                      DIVIDE_ASSIGN) expression
+                      DIVIDE_ASSIGN | FLOOR_DIVIDE_ASSIGN | MODULO_ASSIGN |
+                      POWER_ASSIGN) expression
 
     if_stmt         → IF expression COLON block
                       (ELIF expression COLON block)* (ELSE COLON block)?
@@ -70,6 +71,7 @@ from .ast_nodes import (
     BinaryOpNode,
     UnaryOpNode,
     AssignmentNode,
+    IndexAssignmentNode,
     AugmentedAssignmentNode,
     IfNode,
     WhileNode,
@@ -189,6 +191,41 @@ class Parser:
         while self.match(TokenType.NEWLINE):
             self.advance()
 
+    def _is_indexed_assignment(self) -> bool:
+        """
+        Check if current position is an indexed assignment: arr[i] = value
+
+        Looks for pattern: IDENTIFIER LBRACKET ... RBRACKET ASSIGN
+
+        Returns:
+            True if it's an indexed assignment pattern
+        """
+        # Already matched: IDENTIFIER LBRACKET
+        # Now need to find matching RBRACKET and check what follows
+        depth = 1  # We're inside the first [...]
+        pos = self.pos + 2  # Start after IDENTIFIER and LBRACKET
+
+        while pos < len(self.tokens) and depth > 0:
+            token = self.tokens[pos]
+            if token.type == TokenType.LBRACKET:
+                depth += 1
+            elif token.type == TokenType.RBRACKET:
+                depth -= 1
+            elif token.type in (TokenType.EOF, TokenType.NEWLINE, TokenType.DEDENT):
+                # Hit end prematurely - not an indexed assignment
+                return False
+            pos += 1
+
+        if depth != 0:
+            return False
+
+        # Now pos is at the token after matching RBRACKET
+        if pos < len(self.tokens):
+            next_token = self.tokens[pos]
+            return next_token.type == TokenType.ASSIGN
+
+        return False
+
     # ===== Main Parser Entry Point =====
 
     def parse(self) -> ProgramNode:
@@ -282,17 +319,27 @@ class Parser:
 
         # Assignment or expression
         else:
-            # Check for assignment (including augmented)
+            # Check for assignment (including augmented and indexed)
             if self.match(TokenType.IDENTIFIER):
                 # Look ahead to check for assignment
                 next_token = self.peek(1)
                 if next_token and next_token.type == TokenType.ASSIGN:
                     return self.parse_assignment()
+                elif next_token and next_token.type == TokenType.LBRACKET:
+                    # Check if it's indexed assignment: IDENTIFIER [ ... ] =
+                    if self._is_indexed_assignment():
+                        return self.parse_index_assignment()
+                    # Otherwise it's an expression
+                    # (array access in expression statement)
+                    return self.parse_expression()
                 elif next_token and next_token.type in (
                     TokenType.PLUS_ASSIGN,
                     TokenType.MINUS_ASSIGN,
                     TokenType.MULTIPLY_ASSIGN,
                     TokenType.DIVIDE_ASSIGN,
+                    TokenType.FLOOR_DIVIDE_ASSIGN,
+                    TokenType.MODULO_ASSIGN,
+                    TokenType.POWER_ASSIGN,
                 ):
                     return self.parse_augmented_assignment()
 
@@ -347,6 +394,57 @@ class Parser:
             line=id_token.line, column=id_token.column, target=target, value=value
         )
 
+    def parse_index_assignment(self) -> IndexAssignmentNode:
+        """
+        Parse indexed assignment: arr[i] = expression
+
+        Returns:
+            IndexAssignmentNode
+        """
+        # Parse the index access (arr[i])
+        target = self.parse_index_access()
+
+        # Consume '='
+        self.expect(TokenType.ASSIGN)
+
+        # Parse value expression
+        value = self.parse_expression()
+
+        return IndexAssignmentNode(
+            line=target.line,
+            column=target.column,
+            target=target,
+            value=value,
+        )
+
+    def parse_index_access(self) -> IndexNode:
+        """
+        Parse index access: arr[i]
+
+        Returns:
+            IndexNode
+        """
+        # Get identifier
+        id_token = self.expect(TokenType.IDENTIFIER)
+
+        # Expect '['
+        self.expect(TokenType.LBRACKET)
+
+        # Parse index expression
+        index = self.parse_expression()
+
+        # Expect ']'
+        self.expect(TokenType.RBRACKET)
+
+        return IndexNode(
+            line=id_token.line,
+            column=id_token.column,
+            collection=IdentifierNode(
+                line=id_token.line, column=id_token.column, name=id_token.value
+            ),
+            index=index,
+        )
+
     def parse_augmented_assignment(self) -> AugmentedAssignmentNode:
         """
         Parse augmented assignment: x += expression
@@ -371,6 +469,9 @@ class Parser:
             TokenType.MINUS_ASSIGN,
             TokenType.MULTIPLY_ASSIGN,
             TokenType.DIVIDE_ASSIGN,
+            TokenType.FLOOR_DIVIDE_ASSIGN,
+            TokenType.MODULO_ASSIGN,
+            TokenType.POWER_ASSIGN,
         ):
             raise ParserError(
                 "Expected augmented assignment operator", self.current_token

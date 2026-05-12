@@ -3,6 +3,7 @@ AST Node Definitions for OptiLang Parser
 Each node represents a syntactic construct in the language
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -76,9 +77,17 @@ class UnaryOpNode(ASTNode):
 # Assignments
 @dataclass
 class AssignmentNode(ASTNode):
-    """Represents variable assignment: x = 5"""
+    """Represents variable assignment: x = 5 or arr[i] = 5"""
 
     target: IdentifierNode
+    value: ASTNode
+
+
+@dataclass
+class IndexAssignmentNode(ASTNode):
+    """Represents indexed assignment: arr[i] = value"""
+
+    target: IndexNode
     value: ASTNode
 
 

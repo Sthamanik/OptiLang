@@ -53,12 +53,9 @@ import pytest
 # ---------------------------------------------------------------------------
 sys.path.insert(0, ".")
 
-import optilang.scoring as sc   # noqa: E402  (import after sys.path tweak)
 from optilang.scoring import (   # noqa: E402
     COMPLEXITY_POINTS,
     EFFICIENCY_PATTERNS,
-    MAX_CORRECTNESS,
-    MAX_EFFICIENCY_COMPLEXITY,
     MAX_MAINTAINABILITY,
     MAX_QUALITY,
     MAINTAINABILITY_PATTERNS,
@@ -72,7 +69,6 @@ from optilang.scoring import (   # noqa: E402
     Scorer,
     _assign_grade,
     _build_dimension_hint,
-    _coverage_weighted_complexity,
     _density_to_score,
     _detect_complexity,
     _generate_narrative,
@@ -416,7 +412,7 @@ class TestComplexityDetection:
     def test_complexity_points_covers_all_classes(self) -> None:
         expected_classes = {
             "O(1)", "O(log n)", "O(n)", "O(n log n)",
-            "O(n²)", "O(n³)", "O(n^k)", "O(2^n)",
+            "O(n²)", "O(n² log n)", "O(n³)", "O(n^k)", "O(2^n)",
         }
         assert set(COMPLEXITY_POINTS.keys()) == expected_classes
 
