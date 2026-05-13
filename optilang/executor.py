@@ -28,6 +28,7 @@ from .ast_nodes import (
     IfNode,
     IndexNode,
     ListNode,
+    MethodCallNode,
     NullNode,
     NumberNode,
     PassNode,
@@ -351,6 +352,8 @@ class Executor:
         elif isinstance(node, IndexAssignmentNode):
             # Evaluate target (IndexNode) to get the list and index
             collection = self._eval(node.target.collection, env)
+            if node.target.index is None:
+                raise OptiTypeError("Index required for assignment", node.line)
             index = self._eval(node.target.index, env)
             value = self._eval(node.value, env)
 
@@ -388,6 +391,8 @@ class Executor:
         elif isinstance(node, IndexedAugmentedAssignmentNode):
             # Evaluate target (IndexNode) to get the list and index
             collection = self._eval(node.target.collection, env)
+            if node.target.index is None:
+                raise OptiTypeError("Index required for assignment", node.line)
             index = self._eval(node.target.index, env)
             value = self._eval(node.value, env)
 
@@ -547,6 +552,24 @@ class Executor:
             args = [self._eval(arg, env) for arg in node.arguments]
             return self._call(callee, args, node)
 
+        if isinstance(node, MethodCallNode):
+            # Evaluate the object (e.g., stack)
+            obj = self._eval(node.object, env)
+            # Get the method from the object
+            if not hasattr(obj, node.method):
+                raise OptiTypeError(
+                    f"Object has no attribute '{node.method}'",
+                    node.line,
+                )
+            method = getattr(obj, node.method)
+            # Evaluate arguments
+            args = [self._eval(arg, env) for arg in node.arguments]
+            # Call the method
+            try:
+                return method(*args)
+            except TypeError as exc:
+                raise OptiTypeError(f"Method call failed: {exc}", node.line) from exc
+
         if isinstance(node, ListNode):
             return [self._eval(elem, env) for elem in node.elements]
 
@@ -668,7 +691,9 @@ class Executor:
                 raise OptiValueError(str(exc), node.line) from exc
         raise OptiTypeError("Object is not callable", node.line)
 
-    def _index(self, collection: Any, index: Any, node: IndexNode, env: Environment) -> Any:
+    def _index(
+        self, collection: Any, index: Any, node: IndexNode, env: Environment
+    ) -> Any:
         """Perform an index/key lookup on a collection or slice."""
         # Check if it's a slice (has start/stop/step or index is None with sequence)
         is_slice = (

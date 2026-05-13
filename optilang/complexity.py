@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .ast_nodes import (
     ASTNode,
@@ -44,7 +44,6 @@ from .ast_nodes import (
     BreakNode,
     ContinueNode,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Complexity class enumeration
@@ -195,11 +194,13 @@ class ComplexityAnalyzer:
         self._functions: Dict[str, FunctionDefNode] = {}
         # Track parameters in current scope
         self._params: Set[str] = set()
+        # Track loop iterators
+        self._loop_iterators: Set[str] = set()
 
     def analyze(
         self,
         program: ProgramNode,
-        symbol_table: Optional[Dict[str, any]] = None,
+        symbol_table: Optional[Dict[str, Any]] = None,
     ) -> ComplexityResult:
         """
         Analyze the complexity of a complete program.
@@ -297,7 +298,7 @@ class ComplexityAnalyzer:
         for stmt in block:
             self._collect_functions(stmt)
 
-    def _extract_params(self, symbol_table: Dict[str, any]) -> None:
+    def _extract_params(self, symbol_table: Dict[str, Any]) -> None:
         """Extract parameter names from symbol table."""
         for name, value in symbol_table.items():
             # Parameters are typically stored as simple values, not functions
@@ -373,7 +374,9 @@ class ComplexityAnalyzer:
         # Indexing: O(1) for single element, O(n) for slicing
         if isinstance(node, IndexNode):
             # Check for slicing (start/stop/step present)
-            is_slice = node.start is not None or node.stop is not None or node.step is not None
+            is_slice = (
+                node.start is not None or node.stop is not None or node.step is not None
+            )
 
             if is_slice:
                 # Slicing creates a new collection of size proportional to input
@@ -500,14 +503,23 @@ class ComplexityAnalyzer:
         # Look for assignment inside body that halves the variable
         for stmt in body:
             if isinstance(stmt, AssignmentNode):
-                if isinstance(stmt.target, IdentifierNode) and stmt.target.name == var_name:
+                if (
+                    isinstance(stmt.target, IdentifierNode)
+                    and stmt.target.name == var_name
+                ):
                     # Check if it's a halving operation
                     if isinstance(stmt.value, BinaryOpNode):
                         if stmt.value.operator == "//":
                             # Check if right operand is 2
-                            if isinstance(stmt.value.right, NumberNode) and stmt.value.right.value == 2:
+                            if (
+                                isinstance(stmt.value.right, NumberNode)
+                                and stmt.value.right.value == 2
+                            ):
                                 # Check if left is the same variable
-                                if isinstance(stmt.value.left, IdentifierNode) and stmt.value.left.name == var_name:
+                                if (
+                                    isinstance(stmt.value.left, IdentifierNode)
+                                    and stmt.value.left.name == var_name
+                                ):
                                     return Param(var_name)
 
         return None
@@ -591,7 +603,11 @@ class ComplexityAnalyzer:
 
     def _analyze_function_call(self, call: FunctionCallNode) -> ComplexityExpr:
         """Analyze a function call, using the function body if available."""
-        func_name = call.function.name if isinstance(call.function, IdentifierNode) else "unknown"
+        func_name = (
+            call.function.name
+            if isinstance(call.function, IdentifierNode)
+            else "unknown"
+        )
 
         # Check if we have the function definition
         if func_name in self._functions:
@@ -767,7 +783,11 @@ class ComplexityAnalyzer:
             if left_level >= right_level:
                 return left_str, min(left_conf, right_conf), self._get_bound(expr.left)
             else:
-                return right_str, min(left_conf, right_conf), self._get_bound(expr.right)
+                return (
+                    right_str,
+                    min(left_conf, right_conf),
+                    self._get_bound(expr.right),
+                )
 
         if isinstance(expr, Mul):
             # Compute the product level (nesting depth)
@@ -788,6 +808,9 @@ class ComplexityAnalyzer:
 
             return complexity_str, confidence, bound
 
+        # Fallback for unknown expressions
+        return "Unknown", 0.5, None
+
     def _get_confidence(self, expr: ComplexityExpr) -> float:
         """Get confidence level for an expression."""
         if isinstance(expr, Const):
@@ -801,9 +824,13 @@ class ComplexityAnalyzer:
                 return 1.0
             return 0.7
         if isinstance(expr, Add):
-            return min(self._get_confidence(expr.left), self._get_confidence(expr.right))
+            return min(
+                self._get_confidence(expr.left), self._get_confidence(expr.right)
+            )
         if isinstance(expr, Mul):
-            return min(self._get_confidence(expr.left), self._get_confidence(expr.right))
+            return min(
+                self._get_confidence(expr.left), self._get_confidence(expr.right)
+            )
         return 0.5
 
     def _level_to_string(self, level: int, bound: Optional[str]) -> str:
@@ -851,7 +878,9 @@ class ComplexityAnalyzer:
             return 1  # O(log n) - between O(1) and O(n)
         if isinstance(expr, Add):
             # For Add (max), return the higher level
-            return max(self._complexity_level(expr.left), self._complexity_level(expr.right))
+            return max(
+                self._complexity_level(expr.left), self._complexity_level(expr.right)
+            )
         if isinstance(expr, Mul):
             # For Mul, combine levels with special handling for n * log n
             left = self._complexity_level(expr.left)
@@ -868,7 +897,9 @@ class ComplexityAnalyzer:
             return left + right
         return 2
 
-    def _combine_multiplication(self, left: ComplexityExpr, right: ComplexityExpr) -> str:
+    def _combine_multiplication(
+        self, left: ComplexityExpr, right: ComplexityExpr
+    ) -> str:
         """Combine two complexity expressions as multiplication."""
         # Both parameters - check for same parameter
         if isinstance(left, Param) and isinstance(right, Param):
@@ -943,7 +974,9 @@ class ComplexityAnalyzer:
 
         if isinstance(expr, Log):
             inner_name = self._get_bound(expr.inner) or "n"
-            return f"Halving loop pattern detected — logarithmic time O(log {inner_name})."
+            return (
+                f"Halving loop pattern detected — logarithmic time O(log {inner_name})."
+            )
 
         if isinstance(expr, Add):
             left_exp = self._generate_explanation(expr.left)
@@ -965,7 +998,7 @@ class ComplexityAnalyzer:
 
 def analyze_complexity(
     program: ProgramNode,
-    symbol_table: Optional[Dict[str, any]] = None,
+    symbol_table: Optional[Dict[str, Any]] = None,
 ) -> ComplexityResult:
     """
     Analyze the algorithmic complexity of an OptiLang program.

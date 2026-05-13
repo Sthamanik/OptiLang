@@ -331,7 +331,8 @@ class SemanticAnalyzer:
     def _visit_IndexNode(self, node: IndexNode) -> None:
         """Visit both the collection and the index expressions."""
         self._visit(node.collection)
-        self._visit(node.index)
+        if node.index is not None:
+            self._visit(node.index)
 
     def _visit_ListNode(self, node: ListNode) -> None:
         """Visit all element expressions."""

@@ -642,7 +642,11 @@ class Scorer:
                 pass
 
         # Fall back to profiler if static didn't work
-        if complexity_class == "Unknown" and self._line_stats and self._profiling is not None:
+        if (
+            complexity_class == "Unknown"
+            and self._line_stats
+            and self._profiling is not None
+        ):
             complexity_class = self._profiling.get(
                 "complexity_estimate"
             ) or _detect_complexity(self._line_stats)

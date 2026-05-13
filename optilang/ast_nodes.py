@@ -174,6 +174,15 @@ class FunctionCallNode(ASTNode):
 
 
 @dataclass
+class MethodCallNode(ASTNode):
+    """Represents a method call: obj.method(args)"""
+
+    object: ASTNode
+    method: str
+    arguments: List[ASTNode] = field(default_factory=list)
+
+
+@dataclass
 class ReturnNode(ASTNode):
     """Represents a return statement"""
 
@@ -197,10 +206,10 @@ class DictNode(ASTNode):
 
 @dataclass
 class IndexNode(ASTNode):
-    """Represents indexing into a list[0] or dictionary[key], or slicing list[start:stop:step]"""
+    """Represents indexing into a list[0], dictionary[key], or slicing."""
 
     collection: ASTNode
-    index: ASTNode
+    index: Optional[ASTNode] = None
     start: Optional[ASTNode] = None
     stop: Optional[ASTNode] = None
     step: Optional[ASTNode] = None
