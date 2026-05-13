@@ -84,6 +84,14 @@ class AssignmentNode(ASTNode):
 
 
 @dataclass
+class TupleAssignmentNode(ASTNode):
+    """Represents tuple unpacking: a, b = c, d or arr[i], arr[j] = arr[j], arr[i]"""
+
+    targets: List[ASTNode]  # IdentifierNode or IndexNode
+    value: ASTNode
+
+
+@dataclass
 class IndexAssignmentNode(ASTNode):
     """Represents indexed assignment: arr[i] = value"""
 

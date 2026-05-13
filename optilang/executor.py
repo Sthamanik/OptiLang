@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from .ast_nodes import (
     ASTNode,
     AssignmentNode,
+    TupleAssignmentNode,
     IndexAssignmentNode,
     IndexedAugmentedAssignmentNode,
     AugmentedAssignmentNode,
@@ -348,6 +349,58 @@ class Executor:
         if isinstance(node, AssignmentNode):
             value = self._eval(node.value, env)
             env.assign(node.target.name, value)
+
+        elif isinstance(node, TupleAssignmentNode):
+            # Evaluate the right-hand side tuple
+            value = self._eval(node.value, env)
+            if not isinstance(value, (tuple, list)):
+                raise OptiTypeError(
+                    f"Cannot unpack {type(value).__name__} into "
+                    f"{len(node.targets)} variables",
+                    node.line,
+                )
+            if len(value) != len(node.targets):
+                raise OptiTypeError(
+                    f"Cannot unpack {len(value)} values into "
+                    f"{len(node.targets)} variables",
+                    node.line,
+                )
+            # Assign each value to corresponding target
+            for target, val in zip(node.targets, value):
+                if isinstance(target, IdentifierNode):
+                    env.assign(target.name, val)
+                elif isinstance(target, IndexNode):
+                    # Indexed assignment: arr[i] = val
+                    collection = self._eval(target.collection, env)
+                    if target.index is None:
+                        raise OptiTypeError("Index required", node.line)
+                    index = self._eval(target.index, env)
+                    if isinstance(collection, list):
+                        if not isinstance(index, int):
+                            raise OptiTypeError(
+                                "list indices must be integers", target.line
+                            )
+                        if index < 0:
+                            index = len(collection) + index
+                        if index < 0 or index >= len(collection):
+                            raise OptiIndexError(
+                                int(index),
+                                len(collection),
+                                target.line,
+                            )
+                        collection[index] = val
+                    elif isinstance(collection, dict):
+                        collection[index] = val
+                    else:
+                        raise OptiTypeError(
+                            f"{type(collection).__name__} is not subscriptable",
+                            target.line,
+                        )
+                else:
+                    raise OptiTypeError(
+                        f"Invalid assignment target: {type(target).__name__}",
+                        node.line,
+                    )
 
         elif isinstance(node, IndexAssignmentNode):
             # Evaluate target (IndexNode) to get the list and index

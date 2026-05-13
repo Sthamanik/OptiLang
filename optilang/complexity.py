@@ -62,6 +62,7 @@ class Complexity(Enum):
     N3 = "O(n³)"
     N4 = "O(n⁴)"
     NK = "O(n^k)"
+    NF = "O(n!)"
     EXP = "O(2^n)"
     UNKNOWN = "Unknown"
 
@@ -149,6 +150,17 @@ class CallExpr(ComplexityExpr):
     body_complexity: Optional[ComplexityExpr] = None
 
 
+@dataclass
+class Factorial(ComplexityExpr):
+    """
+    O(n!) — factorial time.
+
+    Used for algorithms that generate all permutations or combinations.
+    """
+
+    inner: ComplexityExpr  # Usually a Param
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Analysis result
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +208,12 @@ class ComplexityAnalyzer:
         self._params: Set[str] = set()
         # Track loop iterators
         self._loop_iterators: Set[str] = set()
+        # Track active function calls for recursion detection
+        self._call_stack: List[str] = []
+        # Cache for analyzed functions (to prevent infinite recursion)
+        self._function_cache: Dict[str, ComplexityExpr] = {}
+        # Track functions currently being analyzed (to detect cycles)
+        self._analyzing: Set[str] = set()
 
     def analyze(
         self,
@@ -611,18 +629,224 @@ class ComplexityAnalyzer:
 
         # Check if we have the function definition
         if func_name in self._functions:
+            # Check if already cached
+            if func_name in self._function_cache:
+                return self._function_cache[func_name]
+
+            # Check if currently being analyzed (cycle detection)
+            if func_name in self._analyzing:
+                # Recursive call - return a placeholder, will be resolved after
+                return Var("n")  # Placeholder for recursive complexity
+
             func_def = self._functions[func_name]
+
+            # Check if function calls itself (recursion)
+            is_recursive = self._function_calls_itself(func_def, func_name)
+
+            # Mark as being analyzed
+            self._analyzing.add(func_name)
+
+            # Push onto call stack
+            self._call_stack.append(func_name)
+
             # Temporarily set params for this function
             saved_params = self._params.copy()
             self._params = {p.name for p in func_def.parameters}
 
+            # Analyze body
             body_complexity = self._analyze_block(func_def.body)
 
             self._params = saved_params
+
+            # Pop from call stack
+            self._call_stack.pop()
+
+            # Remove from analyzing set
+            self._analyzing.discard(func_name)
+
+            # If recursive, compute factorial complexity
+            if is_recursive:
+                # Check if body contains a loop with recursive call
+                pattern = self._detect_recursive_pattern(func_def, call)
+                if pattern == "factorial":
+                    # Return factorial complexity - use 'n' as the bound symbol
+                    # (the size of the input, e.g., array length)
+                    result = Factorial(Var("n"))
+                    self._function_cache[func_name] = result
+                    return result
+
+            # Cache the result
+            self._function_cache[func_name] = body_complexity
+
             return body_complexity
 
         # Unknown function - assume O(1) or O(n) based on context
         return Const(1)
+
+    def _function_calls_itself(self, func_def: FunctionDefNode, func_name: str) -> bool:
+        """Check if function definition contains a call to itself."""
+        return self._contains_function_call(func_def.body, func_name)
+
+    def _contains_function_call(self, nodes: List[ASTNode], func_name: str) -> bool:
+        """Check if any node in the list contains a call to func_name."""
+        for node in nodes:
+            if self._node_calls_function(node, func_name):
+                return True
+        return False
+
+    def _node_calls_function(self, node: ASTNode, func_name: str) -> bool:
+        """Check if node directly calls the given function."""
+        if isinstance(node, FunctionCallNode):
+            name = (
+                node.function.name
+                if isinstance(node.function, IdentifierNode)
+                else None
+            )
+            if name == func_name:
+                return True
+        # Check children
+        for child in self._get_node_children(node):
+            if self._node_calls_function(child, func_name):
+                return True
+        return False
+
+    def _detect_recursive_pattern(
+        self, func_def: FunctionDefNode, _call: Optional[FunctionCallNode] = None
+    ) -> Optional[str]:
+        """
+        Detect if recursive call follows backtracking/permutation pattern.
+
+        Pattern: loop iterating over range, with recursive call inside that
+        modifies the loop parameter (like l+1).
+
+        Returns:
+            "factorial" if pattern detected, None otherwise
+        """
+        # Get the function name
+        func_name = func_def.name.name
+
+        # Look for a for loop in the function body
+        for node in func_def.body:
+            pattern = self._check_node_for_factorial_pattern(node, func_name)
+            if pattern:
+                return pattern
+
+        return None
+
+    def _check_node_for_factorial_pattern(
+        self, node: ASTNode, func_name: str
+    ) -> Optional[str]:
+        """Check if a node contains factorial pattern."""
+        if isinstance(node, ForNode):
+            # Check if the loop body contains a recursive call
+            for stmt in node.body:
+                if self._contains_recursive_call(stmt, func_name):
+                    # Check if recursive call modifies loop iterator
+                    if self._recursive_call_modifies_iterator(node, func_name):
+                        return "factorial"
+        elif isinstance(node, WhileNode):
+            # Check while loop for recursive pattern
+            for stmt in node.body:
+                if self._contains_recursive_call(stmt, func_name):
+                    return "factorial"
+        elif isinstance(node, IfNode):
+            # Check both branches
+            for stmt in node.if_block:
+                if self._check_node_for_factorial_pattern(stmt, func_name):
+                    return "factorial"
+            for _, block in node.elif_parts:
+                for stmt in block:
+                    if self._check_node_for_factorial_pattern(stmt, func_name):
+                        return "factorial"
+            if node.else_block:
+                for stmt in node.else_block:
+                    if self._check_node_for_factorial_pattern(stmt, func_name):
+                        return "factorial"
+        return None
+
+    def _contains_recursive_call(self, node: ASTNode, func_name: str) -> bool:
+        """Check if node contains a call to the given function."""
+        if isinstance(node, FunctionCallNode):
+            called_name = (
+                node.function.name
+                if isinstance(node.function, IdentifierNode)
+                else None
+            )
+            if called_name == func_name:
+                return True
+        # Check children
+        for child in self._get_node_children(node):
+            if self._contains_recursive_call(child, func_name):
+                return True
+        return False
+
+    def _recursive_call_modifies_iterator(
+        self, loop_node: ForNode, func_name: str
+    ) -> bool:
+        """Check if recursive call modifies a parameter in the loop."""
+        # Look for recursive calls in loop body and check their arguments
+        for node in loop_node.body:
+            if self._recursive_call_changes_param(node, func_name):
+                return True
+
+        return False
+
+    def _recursive_call_changes_param(self, node: ASTNode, func_name: str) -> bool:
+        """Check if recursive call modifies any parameter."""
+        if isinstance(node, FunctionCallNode):
+            called_name = (
+                node.function.name
+                if isinstance(node.function, IdentifierNode)
+                else None
+            )
+            if called_name != func_name:
+                return False
+            # Check if any argument modifies a parameter (like param + 1)
+            for arg in node.arguments:
+                if isinstance(arg, BinaryOpNode) and arg.operator in ("+", "-", "*"):
+                    # Check if it's a parameter being modified
+                    if self._is_parameter_modification(arg):
+                        return True
+        # Check children
+        for child in self._get_node_children(node):
+            if self._recursive_call_changes_param(child, func_name):
+                return True
+        return False
+
+    def _is_parameter_modification(self, expr: BinaryOpNode) -> bool:
+        """Check if expression is a parameter modification (e.g., n+1, n-1)."""
+        # Check if left or right is an identifier that could be a parameter
+        for operand in [expr.left, expr.right]:
+            if isinstance(operand, IdentifierNode):
+                return True
+        return False
+
+    def _expr_uses_param(self, node: ASTNode, param_name: str) -> bool:
+        """Check if expression uses the given parameter."""
+        if isinstance(node, IdentifierNode):
+            return node.name == param_name
+        for child in self._get_node_children(node):
+            if self._expr_uses_param(child, param_name):
+                return True
+        return False
+
+    def _get_node_children(self, node: ASTNode) -> List[ASTNode]:
+        """Get all child nodes of an AST node."""
+        children = []
+        for attr in dir(node):
+            if attr.startswith("_"):
+                continue
+            try:
+                val = getattr(node, attr)
+                if isinstance(val, ASTNode):
+                    children.append(val)
+                elif isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, ASTNode):
+                            children.append(item)
+            except (AttributeError, TypeError):
+                pass
+        return children
 
     def _combine_max(self, exprs: List[ComplexityExpr]) -> ComplexityExpr:
         """Combine expressions as O(max(e1, e2, ...))."""
@@ -771,6 +995,12 @@ class ComplexityAnalyzer:
             # Unknown inner - lower confidence
             return "O(log n)", 0.7, "n"
 
+        if isinstance(expr, Factorial):
+            # factorial(n) - high confidence if parameter known
+            if isinstance(expr.inner, Param):
+                return f"O({expr.inner.name}!)", 1.0, expr.inner.name
+            return "O(n!)", 0.9, "n"
+
         if isinstance(expr, Add):
             left_str, left_conf, _ = self._complexity_to_big_o(expr.left)
             right_str, right_conf, _ = self._complexity_to_big_o(expr.right)
@@ -876,6 +1106,8 @@ class ComplexityAnalyzer:
             return 2  # O(n)
         if isinstance(expr, Log):
             return 1  # O(log n) - between O(1) and O(n)
+        if isinstance(expr, Factorial):
+            return 20  # O(n!) - higher than exponential
         if isinstance(expr, Add):
             # For Add (max), return the higher level
             return max(

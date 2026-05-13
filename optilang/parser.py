@@ -58,7 +58,7 @@ Grammar (Simplified):
     index_access    → primary LBRACKET expression RBRACKET
 """
 
-from typing import List, Optional
+from typing import List, Optional, Union, cast
 from .token import Token, TokenType
 from .ast_nodes import (
     ASTNode,
@@ -71,6 +71,7 @@ from .ast_nodes import (
     BinaryOpNode,
     UnaryOpNode,
     AssignmentNode,
+    TupleAssignmentNode,
     IndexAssignmentNode,
     IndexedAugmentedAssignmentNode,
     AugmentedAssignmentNode,
@@ -237,6 +238,41 @@ class Parser:
 
         return False
 
+    def _is_indexed_tuple_unpacking(self) -> bool:
+        """
+        Check if current position is tuple unpacking with index expressions:
+        arr[i], arr[j] = ...
+
+        Looks for pattern: IDENTIFIER LBRACKET ... RBRACKET COMMA
+
+        Returns:
+            True if it's tuple unpacking with index expressions
+        """
+        depth = 1
+        pos = self.pos + 2  # Start after IDENTIFIER and LBRACKET
+
+        while pos < len(self.tokens):
+            token = self.tokens[pos]
+            if token.type == TokenType.LBRACKET:
+                depth += 1
+            elif token.type == TokenType.RBRACKET:
+                depth -= 1
+            elif token.type in (TokenType.EOF, TokenType.NEWLINE, TokenType.DEDENT):
+                return False
+            elif depth == 0:
+                break
+            pos += 1
+
+        if depth != 0:
+            return False
+
+        # Now pos is at the token after all matching RBRACKETs
+        if pos < len(self.tokens):
+            next_token = self.tokens[pos]
+            return next_token.type == TokenType.COMMA
+
+        return False
+
     def _is_indexed_augmented_assignment(self) -> bool:
         """
         Check if current position is an indexed augmented assignment:
@@ -380,6 +416,11 @@ class Parser:
                 next_token = self.peek(1)
                 if next_token and next_token.type == TokenType.ASSIGN:
                     return self.parse_assignment()
+                elif next_token and next_token.type == TokenType.COMMA:
+                    # Tuple unpacking: a, b = ...
+                    # match() doesn't consume, so current token is still the identifier
+                    first_id = self.current_token
+                    return self.parse_assignment(first_id=first_id)
                 elif next_token and next_token.type == TokenType.LBRACKET:
                     # Check if it's indexed assignment: IDENTIFIER [ ... ] =
                     if self._is_indexed_assignment():
@@ -387,6 +428,9 @@ class Parser:
                     # Check if it's indexed augmented: IDENTIFIER [ ... ] += ...
                     if self._is_indexed_augmented_assignment():
                         return self.parse_indexed_augmented_assignment()
+                    # Check if it's tuple unpacking with index: arr[i], arr[j] = ...
+                    if self._is_indexed_tuple_unpacking():
+                        return self.parse_assignment()
                     # Otherwise it's an expression
                     # (array access in expression statement)
                     return self.parse_expression()
@@ -429,28 +473,199 @@ class Parser:
 
     # ===== Assignment Statements =====
 
-    def parse_assignment(self) -> AssignmentNode:
+    def _parse_target(self) -> ASTNode:
         """
-        Parse variable assignment: x = expression
+        Parse an assignment target: identifier or index expression.
+        Returns IdentifierNode or IndexNode.
 
         Returns:
-            AssignmentNode
+            ASTNode: The parsed target
         """
-        # Get identifier
         id_token = self.expect(TokenType.IDENTIFIER)
-        target = IdentifierNode(
+        first_target = IdentifierNode(
             line=id_token.line, column=id_token.column, name=id_token.value
         )
 
-        # Consume '='
-        self.expect(TokenType.ASSIGN)
+        # Check for index access: arr[i]
+        if self.match(TokenType.LBRACKET):
+            return self._parse_index_chain(first_target)
 
-        # Parse value expression
-        value = self.parse_expression()
+        return first_target
 
-        return AssignmentNode(
-            line=id_token.line, column=id_token.column, target=target, value=value
+    def _parse_index_chain(self, collection: ASTNode) -> IndexNode:
+        """
+        Parse chained index access: arr[i][j][k]
+
+        Args:
+            collection: The base collection (IdentifierNode or IndexNode)
+
+        Returns:
+            IndexNode with chain
+        """
+        # Consume '['
+        self.advance()
+
+        # Check for slice vs index
+        start = None
+        stop = None
+        step = None
+        index = None
+
+        if self.current_token and self.current_token.type == TokenType.COLON:
+            # Slice: arr[:] or arr[:3]
+            self.advance()
+            if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                stop = self.parse_expression()
+            if self.match(TokenType.COLON):
+                if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    step = self.parse_expression()
+        else:
+            first_expr = self.parse_expression()
+            if self.match(TokenType.COLON):
+                start = first_expr
+                if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    stop = self.parse_expression()
+                if self.match(TokenType.COLON):
+                    if (
+                        self.current_token
+                        and self.current_token.type != TokenType.RBRACKET
+                    ):
+                        step = self.parse_expression()
+            else:
+                index = first_expr
+
+        self.expect(TokenType.RBRACKET)
+
+        result = IndexNode(
+            line=collection.line,
+            column=collection.column,
+            collection=collection,
+            index=index,
+            start=start,
+            stop=stop,
+            step=step,
         )
+
+        # Check for chained access: arr[i][j]
+        if self.match(TokenType.LBRACKET):
+            return self._parse_index_chain(result)
+
+        return result
+
+    def parse_assignment(
+        self, first_id: Optional[Token] = None
+    ) -> Union[AssignmentNode, TupleAssignmentNode, IndexAssignmentNode]:
+        """
+        Parse variable assignment: x = expression
+        or tuple unpacking: a, b = c, d or arr[i], arr[j] = arr[j], arr[i]
+
+        Args:
+            first_id: Optional first identifier token (if already consumed)
+
+        Returns:
+            AssignmentNode, TupleAssignmentNode, or IndexAssignmentNode
+        """
+        # Get first identifier - use provided or consume new
+        if first_id is not None:
+            first_target: ASTNode = IdentifierNode(
+                line=first_id.line, column=first_id.column, name=first_id.value
+            )
+            # First identifier was already seen but not consumed - advance past it
+            self.advance()
+
+            # Check for index access: x[i] = ...
+            if self.match(TokenType.LBRACKET):
+                index_target = self._parse_index_chain(first_target)
+                # Check if it's part of tuple unpacking: x[i], y = ...
+                if self.match(TokenType.COMMA):
+                    targets: List[ASTNode] = [index_target]
+                    while self.match(TokenType.COMMA):
+                        self.advance()
+                        targets.append(self._parse_target())
+                    self.expect(TokenType.ASSIGN)
+                    value = self.parse_assignment_expression()
+                    return TupleAssignmentNode(
+                        line=targets[0].line,
+                        column=targets[0].column,
+                        targets=targets,
+                        value=value,
+                    )
+                # Regular index assignment: x[i] = value
+                self.expect(TokenType.ASSIGN)
+                value = self.parse_assignment_expression()
+                return IndexAssignmentNode(
+                    line=index_target.line,
+                    column=index_target.column,
+                    target=index_target,
+                    value=value,
+                )
+
+            # Now current token should be COMMA for tuple unpacking
+            if self.match(TokenType.COMMA):
+                targets = [first_target]
+                while self.match(TokenType.COMMA):
+                    self.advance()  # consume comma
+                    targets.append(self._parse_target())
+                self.expect(TokenType.ASSIGN)
+                value = self.parse_assignment_expression()
+
+                return TupleAssignmentNode(
+                    line=first_target.line,
+                    column=first_target.column,
+                    targets=targets,
+                    value=value,
+                )
+            # Not tuple unpacking - must be regular assignment, consume '='
+            self.expect(TokenType.ASSIGN)
+            value = self.parse_assignment_expression()
+            return AssignmentNode(
+                line=first_target.line,
+                column=first_target.column,
+                target=cast(IdentifierNode, first_target),
+                value=value,
+            )
+        else:
+            # Parse first target (could be identifier or index expression)
+            first_target = self._parse_target()
+
+            # Check for tuple unpacking: a, b = ... or arr[i], arr[j] = ...
+            if self.match(TokenType.COMMA):
+                targets = [first_target]
+                while self.match(TokenType.COMMA):
+                    self.advance()  # consume comma
+                    targets.append(self._parse_target())
+                self.expect(TokenType.ASSIGN)
+                value = self.parse_assignment_expression()
+
+                return TupleAssignmentNode(
+                    line=first_target.line,
+                    column=first_target.column,
+                    targets=targets,
+                    value=value,
+                )
+
+            # Single target - could be regular or index assignment
+            if isinstance(first_target, IndexNode):
+                # Index assignment: arr[i] = value
+                self.expect(TokenType.ASSIGN)
+                value = self.parse_assignment_expression()
+                return IndexAssignmentNode(
+                    line=first_target.line,
+                    column=first_target.column,
+                    target=first_target,
+                    value=value,
+                )
+
+            # Regular assignment: x = expression
+            self.expect(TokenType.ASSIGN)
+            value = self.parse_assignment_expression()
+
+            return AssignmentNode(
+                line=first_target.line,
+                column=first_target.column,
+                target=cast(IdentifierNode, first_target),
+                value=value,
+            )
 
     def parse_index_assignment(self) -> IndexAssignmentNode:
         """
@@ -465,8 +680,8 @@ class Parser:
         # Consume '='
         self.expect(TokenType.ASSIGN)
 
-        # Parse value expression
-        value = self.parse_expression()
+        # Parse value expression (supports tuple)
+        value = self.parse_assignment_expression()
 
         return IndexAssignmentNode(
             line=target.line,
@@ -1037,6 +1252,31 @@ class Parser:
 
         return left
 
+    def parse_assignment_expression(self) -> ASTNode:
+        """
+        Parse expression on right side of assignment.
+        Handles comma-separated expressions as tuples.
+
+        Returns:
+            ASTNode - expression or tuple (ListNode)
+        """
+        # Parse the first expression
+        left = self.parse_expression()
+
+        # Check for comma-separated values (tuple)
+        if self.match(TokenType.COMMA):
+            elements = [left]
+            while self.match(TokenType.COMMA):
+                self.advance()  # consume comma
+                elements.append(self.parse_expression())
+            return ListNode(
+                line=elements[0].line,
+                column=elements[0].column,
+                elements=elements,
+            )
+
+        return left
+
     def parse_unary(self) -> ASTNode:
         """Parse unary operations (-, not)"""
         if self.match(TokenType.MINUS, TokenType.NOT):
@@ -1110,6 +1350,30 @@ class Parser:
             token = self.advance()
             node = NullNode(line=token.line, column=token.column)
             return self.parse_postfix(node)
+
+        # Tuple/parenthesized expression
+        elif self.match(TokenType.LPAREN):
+            lparen = self.advance()
+            # Check for empty tuple ()
+            if self.match(TokenType.RPAREN):
+                self.advance()
+                # Empty tuple
+                return ListNode(line=lparen.line, column=lparen.column, elements=[])
+            # Parse first expression
+            first_expr = self.parse_expression()
+            # Check if it's a tuple (comma follows) or just parenthesized
+            if self.match(TokenType.COMMA):
+                elements = [first_expr]
+                while self.match(TokenType.COMMA):
+                    self.advance()
+                    elements.append(self.parse_expression())
+                self.expect(TokenType.RPAREN)
+                return ListNode(
+                    line=lparen.line, column=lparen.column, elements=elements
+                )
+            # Just parenthesized expression
+            self.expect(TokenType.RPAREN)
+            return self.parse_postfix(first_expr)
 
         # Identifier or function call
         elif self.match(TokenType.IDENTIFIER):
