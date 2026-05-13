@@ -34,6 +34,13 @@ Pattern classification constants (useful for external tools):
 
 from __future__ import annotations
 
+from .complexity import (
+    Complexity,
+    ComplexityExpr,
+    ComplexityResult,
+    analyze_complexity,
+    analyze_function_complexity,
+)
 from .executor import Executor, execute
 from .models import ExecutionResult, OptimizationReport, Suggestion
 from .optimizer import Optimizer, analyze, analyze_source
@@ -58,7 +65,13 @@ __all__ = [
     "analyze",
     "analyze_source",
     "calculate_score",
+    # ── Complexity analysis ──
+    "analyze_complexity",
+    "analyze_function_complexity",
     # ── Classes ──
+    "Complexity",
+    "ComplexityExpr",
+    "ComplexityResult",
     "Executor",
     "Optimizer",
     "Scorer",

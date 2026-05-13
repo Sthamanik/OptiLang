@@ -514,7 +514,7 @@ class Parser:
 
     def parse_index_access(self) -> IndexNode:
         """
-        Parse index access: arr[i] or arr[i][j] (chained)
+        Parse index access: arr[i] or arr[i][j] (chained) or slicing arr[start:stop:step]
 
         Returns:
             IndexNode
@@ -525,8 +525,44 @@ class Parser:
         # Expect '['
         self.expect(TokenType.LBRACKET)
 
-        # Parse index expression
-        index = self.parse_expression()
+        # Check if it's a slice starting with ':' (arr[:3] or arr[:])
+        start = None
+        stop = None
+        step = None
+        index = None
+
+        if self.current_token and self.current_token.type == TokenType.COLON:
+            # It's a slice with no start: arr[:] or arr[:3]
+            self.advance()  # consume ':'
+
+            # Parse stop if present
+            if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                stop = self.parse_expression()
+
+            # Parse step if second colon present
+            if self.match(TokenType.COLON):
+                if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    step = self.parse_expression()
+        else:
+            # Parse index or start expression
+            first_expr = self.parse_expression()
+
+            # Check for slice syntax (arr[start:stop:step])
+            if self.match(TokenType.COLON):
+                # It's a slice!
+                start = first_expr
+
+                # Parse stop if present
+                if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    stop = self.parse_expression()
+
+                # Parse step if second colon present
+                if self.match(TokenType.COLON):
+                    if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                        step = self.parse_expression()
+            else:
+                # Regular index
+                index = first_expr
 
         # Expect ']'
         self.expect(TokenType.RBRACKET)
@@ -539,18 +575,50 @@ class Parser:
                 line=id_token.line, column=id_token.column, name=id_token.value
             ),
             index=index,
+            start=start,
+            stop=stop,
+            step=step,
         )
 
-        # Check for chained indexing (arr[i][j])
+        # Check for chained indexing (arr[i][j] or arr[1:2][0])
         while self.match(TokenType.LBRACKET):
             bracket_token = self.advance()
-            next_index = self.parse_expression()
+
+            # Check for slice in chained access
+            chain_index = None
+            chain_start = None
+            chain_stop = None
+            chain_step = None
+
+            if self.current_token and self.current_token.type == TokenType.COLON:
+                self.advance()
+                if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    chain_stop = self.parse_expression()
+                if self.match(TokenType.COLON):
+                    if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                        chain_step = self.parse_expression()
+            else:
+                chain_first = self.parse_expression()
+                if self.match(TokenType.COLON):
+                    chain_start = chain_first
+                    if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                        chain_stop = self.parse_expression()
+                    if self.match(TokenType.COLON):
+                        if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                            chain_step = self.parse_expression()
+                else:
+                    chain_index = chain_first
+
             self.expect(TokenType.RBRACKET)
+
             node = IndexNode(
                 line=bracket_token.line,
                 column=bracket_token.column,
                 collection=node,
-                index=next_index,
+                index=chain_index,
+                start=chain_start,
+                stop=chain_stop,
+                step=chain_step,
             )
 
         return node
@@ -1062,7 +1130,7 @@ class Parser:
 
     def parse_postfix(self, node: ASTNode) -> ASTNode:
         """
-        Parse postfix operations (indexing)
+        Parse postfix operations (indexing and slicing)
 
         Args:
             node: Base node to apply postfix operations to
@@ -1072,7 +1140,60 @@ class Parser:
         """
         while self.match(TokenType.LBRACKET):
             bracket_token = self.advance()
-            index = self.parse_expression()
+
+            # Check if it's a slice (arr[:] or arr[1:3] or arr[::2])
+            start = None
+            stop = None
+            step = None
+            index = None
+
+            if self.current_token and self.current_token.type == TokenType.COLON:
+                # Slice with no start: [:3] or [::2] or [:]
+                self.advance()  # consume ':'
+
+                # Check if next is also colon (step only, e.g., [::2])
+                if self.current_token and self.current_token.type == TokenType.COLON:
+                    # Step only: [::2]
+                    self.advance()  # consume second ':'
+                    if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                        step = self.parse_expression()
+                elif self.current_token and self.current_token.type != TokenType.RBRACKET:
+                    # Parse stop if present
+                    stop = self.parse_expression()
+
+                    # Parse step if second colon present
+                    if self.match(TokenType.COLON):
+                        self.advance()  # consume second ':'
+                        if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                            step = self.parse_expression()
+            else:
+                # Parse index or start expression
+                first_expr = self.parse_expression()
+
+                # Check for slice syntax (arr[start:stop:step])
+                if self.match(TokenType.COLON):
+                    # It's a slice!
+                    self.advance()  # consume ':'
+                    start = first_expr
+
+                    # Check if next is also colon (step only, e.g., [1::2])
+                    if self.current_token and self.current_token.type == TokenType.COLON:
+                        self.advance()  # consume second ':'
+                        if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                            step = self.parse_expression()
+                    elif self.current_token and self.current_token.type != TokenType.RBRACKET:
+                        # Parse stop if present
+                        stop = self.parse_expression()
+
+                        # Parse step if second colon present
+                        if self.match(TokenType.COLON):
+                            self.advance()  # consume second ':'
+                            if self.current_token and self.current_token.type != TokenType.RBRACKET:
+                                step = self.parse_expression()
+                else:
+                    # Regular index
+                    index = first_expr
+
             self.expect(TokenType.RBRACKET)
 
             node = IndexNode(
@@ -1080,6 +1201,9 @@ class Parser:
                 column=bracket_token.column,
                 collection=node,
                 index=index,
+                start=start,
+                stop=stop,
+                step=step,
             )
 
         return node

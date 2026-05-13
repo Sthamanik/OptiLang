@@ -565,8 +565,8 @@ class Executor:
 
         if isinstance(node, IndexNode):
             collection = self._eval(node.collection, env)
-            index = self._eval(node.index, env)
-            return self._index(collection, index, node)
+            index = self._eval(node.index, env) if node.index is not None else None
+            return self._index(collection, index, node, env)
 
         raise OptiRuntimeError(
             f"Unsupported AST node: {type(node).__name__}", node.line
@@ -668,8 +668,17 @@ class Executor:
                 raise OptiValueError(str(exc), node.line) from exc
         raise OptiTypeError("Object is not callable", node.line)
 
-    def _index(self, collection: Any, index: Any, node: IndexNode) -> Any:
-        """Perform an index/key lookup on a collection."""
+    def _index(self, collection: Any, index: Any, node: IndexNode, env: Environment) -> Any:
+        """Perform an index/key lookup on a collection or slice."""
+        # Check if it's a slice (has start/stop/step or index is None with sequence)
+        is_slice = (
+            node.start is not None or node.stop is not None or node.step is not None
+        ) or (index is None and isinstance(collection, (list, str, tuple)))
+
+        if is_slice:
+            return self._slice(collection, node, env)
+
+        # Regular index lookup
         if isinstance(collection, (list, str, tuple)):
             if not isinstance(index, int):
                 raise OptiTypeError(
@@ -690,6 +699,35 @@ class Executor:
                 raise OptiKeyError(index, node.line) from exc
 
         raise OptiTypeError("Object is not indexable", node.line)
+
+    def _slice(self, collection: Any, node: IndexNode, env: Environment) -> Any:
+        """Perform slice operation: collection[start:stop:step]"""
+        if not isinstance(collection, (list, str, tuple)):
+            raise OptiTypeError("Object is not sliceable", node.line)
+
+        # Evaluate slice components (None means omit that bound, like Python)
+        start_val = self._eval(node.start, env) if node.start is not None else None
+        stop_val = self._eval(node.stop, env) if node.stop is not None else None
+        step_val = self._eval(node.step, env) if node.step is not None else None
+
+        # Validate step
+        if step_val is not None and not isinstance(step_val, int):
+            raise OptiTypeError(
+                "Slice step must be an integer",
+                node.line,
+                expected="int",
+                got=type(step_val).__name__,
+            )
+
+        if step_val == 0:
+            raise OptiValueError("Slice step cannot be zero", node.line)
+
+        # Use Python's slice object which handles all edge cases correctly
+        # including negative indices and negative steps
+        try:
+            return collection[slice(start_val, stop_val, step_val)]
+        except Exception as exc:
+            raise OptiValueError(f"Slice error: {exc}", node.line) from exc
 
     @staticmethod
     def _truthy(value: Any) -> bool:

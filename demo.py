@@ -404,13 +404,14 @@ for i in numbers:
 """
 
 PROGRAM_11 = """\
-for i in range(50):
-    for j in range(50):
-        k = 100
+# O(1) — Dictionary Lookup
 
-        while k > 1:
-            print(i, j, k)
-            k = k // 2
+student = {
+    "name": "Manik",
+    "age": 20
+}
+
+print(student["name"])
 
 """
 

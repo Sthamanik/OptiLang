@@ -197,10 +197,13 @@ class DictNode(ASTNode):
 
 @dataclass
 class IndexNode(ASTNode):
-    """Represents indexing into a list[0] or dictionary[key]"""
+    """Represents indexing into a list[0] or dictionary[key], or slicing list[start:stop:step]"""
 
     collection: ASTNode
     index: ASTNode
+    start: Optional[ASTNode] = None
+    stop: Optional[ASTNode] = None
+    step: Optional[ASTNode] = None
 
 
 # Exception Handling

@@ -99,6 +99,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .complexity import analyze_complexity as static_analyze_complexity
 from .constants import COMPLEXITY_POINTS
 
 # ---------------------------------------------------------------------------
@@ -480,11 +481,13 @@ class Scorer:
         optimizer_report: Optional[Any],  # OptimizationReport | None
         source_lines: int = 1,
         errors: Optional[List[str]] = None,
+        ast: Optional[Any] = None,  # ProgramNode for static complexity analysis
     ) -> None:
         self._profiling = profiling_data
         self._optimizer = optimizer_report
         self._source_lines = max(source_lines, 1)
         self._errors = errors or []
+        self._ast = ast
 
         # Pre-extract line_stats for convenience
         self._line_stats: Dict[str, Any] = (
@@ -604,8 +607,8 @@ class Scorer:
         Efficiency + Complexity dimension (0–30).
 
         Complexity sub-score (0–15):
-            Derived from Big-O class detected via execution count heuristic.
-            Requires profiling data; falls back to PARTIAL_COMPLEXITY (7.0).
+            Uses static AST analysis when available, falls back to profiler
+            heuristic, then to partial credit (7.0).
 
         Efficiency sub-score (0–15):
             Derived from EFFICIENCY_PATTERNS optimizer suggestions.
@@ -619,17 +622,45 @@ class Scorer:
             (complexity_class, complexity_subscore, efficiency_subscore,
              profiling_partial_flag, optimizer_partial_flag)
         """
-        # Complexity sub-score — requires profiling data
-        if not self._line_stats or self._profiling is None:
-            c_sub = PARTIAL_COMPLEXITY
-            complexity_class = "Unknown"
-            profiling_partial = True
-        else:
+        # Complexity sub-score — try static analysis first
+        complexity_class = "Unknown"
+        profiling_partial = False
+
+        if self._ast is not None:
+            # Use static complexity analysis
+            try:
+                static_result = static_analyze_complexity(self._ast)
+                complexity_class = static_result.complexity
+                # Static analysis with high confidence doesn't need profiling fallback
+                if static_result.confidence >= 1.0:
+                    profiling_partial = False
+                else:
+                    # Medium confidence - still use profiler if available
+                    profiling_partial = False
+            except Exception:
+                # Static analysis failed, fall through to profiler
+                pass
+
+        # Fall back to profiler if static didn't work
+        if complexity_class == "Unknown" and self._line_stats and self._profiling is not None:
             complexity_class = self._profiling.get(
                 "complexity_estimate"
             ) or _detect_complexity(self._line_stats)
-            c_sub = _coverage_weighted_complexity(complexity_class, self._line_stats)
             profiling_partial = False
+        elif complexity_class == "Unknown":
+            # No static analysis and no profiler - use partial credit
+            c_sub = PARTIAL_COMPLEXITY
+            profiling_partial = True
+            complexity_class = "Unknown"
+
+        # Calculate complexity sub-score
+        if complexity_class != "Unknown" and self._line_stats:
+            c_sub = _coverage_weighted_complexity(complexity_class, self._line_stats)
+        elif complexity_class != "Unknown":
+            # Have complexity but no line stats - give full marks
+            c_sub = COMPLEXITY_POINTS.get(complexity_class, PARTIAL_COMPLEXITY)
+        else:
+            c_sub = PARTIAL_COMPLEXITY
 
         # Efficiency sub-score — requires optimizer data
         if self._optimizer is None:
@@ -1114,6 +1145,7 @@ def calculate_score(
     optimizer_report: Optional[Any] = None,
     source_lines: int = 1,
     errors: Optional[List[str]] = None,
+    ast: Optional[Any] = None,
 ) -> ScoreReport:
     """
     Calculate a four-dimension optimization score.
@@ -1125,6 +1157,7 @@ def calculate_score(
         optimizer_report:  ``OptimizationReport`` from ``Optimizer.run()``, or None.
         source_lines:      Number of lines in the original source code.
         errors:            List of error strings from ``ExecutionResult.errors``.
+        ast:              Parsed ProgramNode for static complexity analysis.
 
     Returns:
         ``ScoreReport`` with final score, grade, complexity class,
@@ -1148,6 +1181,7 @@ def calculate_score(
             optimizer_report=report,
             source_lines=source.count("\\n") + 1,
             errors=result.errors,
+            ast=ast,
         )
 
         print(score_report.score)            # e.g. 68.5
@@ -1161,4 +1195,5 @@ def calculate_score(
         optimizer_report=optimizer_report,
         source_lines=source_lines,
         errors=errors,
+        ast=ast,
     ).calculate()
