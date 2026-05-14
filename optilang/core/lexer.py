@@ -39,7 +39,7 @@ from __future__ import annotations
 from enum import Enum, auto
 from typing import List, Optional, Any
 from .token import Token, TokenType, KEYWORDS
-from .utils.errors import LexerError
+from ..utils.errors import LexerError
 
 # ─────────────────────────────────────────────
 #  DFA States

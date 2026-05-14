@@ -1,61 +1,15 @@
-"""
-OptiLang Parser - Converts tokens to Abstract Syntax Tree (AST)
+"""OptiLang Parser - Converts tokens to Abstract Syntax Tree (AST).
 
-This parser implements a recursive descent parser for the PyLite language.
-It builds an AST from the token stream produced by the lexer.
-
-Grammar (Simplified):
-    program         → statements EOF
-    statements      → statement*
-    statement       → assignment | aug_assignment | if_stmt | while_stmt | for_stmt |
-                      function_def | return_stmt | break_stmt | continue_stmt |
-                      pass_stmt | try_stmt | expression_stmt
-
-    assignment      → IDENTIFIER ASSIGN expression
-    aug_assignment  → IDENTIFIER (PLUS_ASSIGN | MINUS_ASSIGN | MULTIPLY_ASSIGN |
-                      DIVIDE_ASSIGN | FLOOR_DIVIDE_ASSIGN | MODULO_ASSIGN |
-                      POWER_ASSIGN) expression
-
-    if_stmt         → IF expression COLON block
-                      (ELIF expression COLON block)* (ELSE COLON block)?
-    while_stmt      → WHILE expression COLON block
-    for_stmt        → FOR IDENTIFIER IN expression COLON block
-
-    function_def    → DEF IDENTIFIER LPAREN params? RPAREN COLON block
-    params          → IDENTIFIER (COMMA IDENTIFIER)*
-
-    return_stmt     → RETURN expression?
-    break_stmt      → BREAK
-    continue_stmt   → CONTINUE
-    pass_stmt       → PASS
-
-    try_stmt        → TRY COLON block EXCEPT COLON block (FINALLY COLON block)?
-
-    block           → INDENT statements DEDENT | statement
-    expression_stmt → expression
-
-    # Expression hierarchy (lowest to highest precedence)
-    expression      → logical_or
-    logical_or      → logical_and (OR logical_and)*
-    logical_and     → equality (AND equality)*
-    equality        → comparison ((EQ | NE) comparison)*
-    comparison      → term ((LT | LE | GT | GE) term)*
-    term            → factor ((PLUS | MINUS) factor)*
-    factor          → unary ((MULTIPLY | DIVIDE | MODULO | FLOOR_DIVIDE) unary)*
-    unary           → (MINUS | NOT) unary | power
-    power           → primary (POWER unary)?
-    primary         → NUMBER | STRING | TRUE | FALSE | NONE |
-                      IDENTIFIER | function_call | list_literal | dict_literal |
-                      index_access | LPAREN expression RPAREN
-
-    function_call   → IDENTIFIER LPAREN arguments? RPAREN
-    arguments       → expression (COMMA expression)*
-
-    list_literal    → LBRACKET (expression (COMMA expression)*)? RBRACKET
-    dict_literal    → LBRACE (dict_pair (COMMA dict_pair)*)? RBRACE
-    dict_pair       → expression COLON expression
-
-    index_access    → primary LBRACKET expression RBRACKET
+Grammar:
+    program → statements EOF
+    statement → assignment | if_stmt | while_stmt | for_stmt | function_def |
+                return | break | continue | pass | try | expr_stmt
+    expression → logical_or (precedence: logical_or → logical_and → equality →
+                comparison → term → factor → unary → power → primary)
+    primary → NUMBER | STRING | TRUE | FALSE | NONE | IDENTIFIER | call | list | dict | index
+    call → IDENTIFIER LPAREN args? RPAREN
+    list → LBRACKET (expr (COMMA expr)*)? RBRACKET
+    dict → LBRACE (expr COLON expr (COMMA expr COLON expr)*)? RBRACE
 """
 
 from typing import List, Optional, Union, cast
@@ -90,7 +44,7 @@ from .ast_nodes import (
     IndexNode,
     TryNode,
 )
-from .utils.errors import ParserError
+from ..utils.errors import ParserError
 
 
 class Parser:
