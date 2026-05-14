@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from .ast_nodes import ProgramNode
+    from core.ast_nodes import ProgramNode
 
-from .profiler import ProfilingData
+from ..runtime.profiler import ProfilingData
 
 
 @dataclass
