@@ -34,19 +34,26 @@ Pattern classification constants (useful for external tools):
 
 from __future__ import annotations
 
-from .complexity import (
+import sys
+import importlib
+from typing import Any
+
+# Re-export core modules for backward compatibility
+from .core import ast_nodes as ast_nodes
+
+from .analysis.complexity import (
     Complexity,
     ComplexityExpr,
     ComplexityResult,
     analyze_complexity,
     analyze_function_complexity,
 )
-from .executor import Executor, execute
-from .models import ExecutionResult, OptimizationReport, Suggestion
-from .optimizer import Optimizer, analyze, analyze_source
-from .parser import parse
-from .profiler import ProfilingData
-from .scoring import (
+from .runtime.executor import Executor, execute
+from .types.models import ExecutionResult, OptimizationReport, Suggestion
+from .analysis.optimizer import Optimizer, analyze, analyze_source
+from .core.parser import parse
+from .runtime.profiler import ProfilingData
+from .analysis.scoring import (
     EFFICIENCY_PATTERNS,
     MAINTAINABILITY_PATTERNS,
     QUALITY_PATTERNS,
@@ -89,3 +96,40 @@ __all__ = [
     # ── Package version ──
     "__version__",
 ]
+
+# Backward compatibility: lazy loading via __getattr__
+# This allows `from optilang.lexer import tokenize` to work
+# even though lexer.py is now in optilang/core/
+_module_map = {
+    'lexer': 'optilang.core.lexer',
+    'parser': 'optilang.core.parser',
+    'token': 'optilang.core.token',
+    'ast_nodes': 'optilang.core.ast_nodes',
+    'executor': 'optilang.runtime.executor',
+    'optimizer': 'optilang.analysis.optimizer',
+    'scoring': 'optilang.analysis.scoring',
+    'complexity': 'optilang.analysis.complexity',
+    'semantic_analyzer': 'optilang.analysis.semantic_analyzer',
+    'models': 'optilang.types.models',
+    'constants': 'optilang.types.constants',
+}
+
+# Special handling for profiler - use __getattr__ for import, CLI via runtime
+_extra_imports = {'profiler': 'optilang.runtime.profiler'}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _module_map:
+        return importlib.import_module(_module_map[name])
+    if name in _extra_imports:
+        return importlib.import_module(_extra_imports[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Also register in sys.modules for deeper imports (skip profiler due to CLI conflict)
+for name, path in _module_map.items():
+    if f'optilang.{name}' not in sys.modules:
+        try:
+            sys.modules[f'optilang.{name}'] = importlib.import_module(path)
+        except ImportError:
+            pass
