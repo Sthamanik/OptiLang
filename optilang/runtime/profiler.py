@@ -18,7 +18,22 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .ast_nodes import (
+__all__ = [
+    "Profiler",
+    "ProfilerConfig",
+    "ProfilingData",
+    "FunctionStats",
+    "LineStats",
+    "detect_complexity",
+    "detect_complexity_with_confidence",
+    "estimate_memory_bytes",
+    "profile_execution",
+    # Internal helpers for tests
+    "_estimate_deep_object_size",
+    "_safe_getsizeof",
+]
+
+from ..core.ast_nodes import (
     ASTNode,
     AssignmentNode,
     AugmentedAssignmentNode,
@@ -27,7 +42,7 @@ from .ast_nodes import (
     IdentifierNode,
     WhileNode,
 )
-from .constants import (
+from ..types.constants import (
     COMPLEXITY_EXP,
     COMPLEXITY_LOGN,
     COMPLEXITY_N,
@@ -583,7 +598,7 @@ def _detect_recursion_and_complexity(
     if ast is None:
         return None, 0
 
-    from .ast_nodes import FunctionDefNode, FunctionCallNode
+    from ..core.ast_nodes import FunctionDefNode, FunctionCallNode
 
     # Find all function definitions
     functions: Dict[str, "FunctionDefNode"] = {}
@@ -658,7 +673,7 @@ def _analyze_nested_loops(ast: Optional["ASTNode"]) -> Optional[str]:
     if ast is None:
         return None
 
-    from .ast_nodes import ForNode, WhileNode, AssignmentNode, IdentifierNode
+    from ..core.ast_nodes import ForNode, WhileNode, AssignmentNode, IdentifierNode
 
     loop_info: List[Tuple[int, str, "ASTNode"]] = []  # (depth, pattern, node)
 
@@ -673,7 +688,7 @@ def _analyze_nested_loops(ast: Optional["ASTNode"]) -> Optional[str]:
                 if isinstance(stmt, AssignmentNode):
                     rhs = getattr(stmt, "value", None)
                     if rhs is not None:
-                        from .ast_nodes import BinaryOpNode
+                        from ..core.ast_nodes import BinaryOpNode
 
                         if isinstance(rhs, BinaryOpNode):
                             op = getattr(rhs, "operator", None)
@@ -1352,7 +1367,77 @@ def profile_execution(
     return result, _profiler.get_data()
 
 
+def main() -> None:
+    """CLI entry point for the profiler."""
+    _demo_profiler = Profiler()
+    _demo_profiler.start()
+
+    _fake_env: Dict[str, Any] = {
+        "i": 0,
+        "total": 0,
+        "label": "optilang",
+        "items": [1, 2, 3],
+    }
+
+    for _i in range(10):
+        _demo_profiler.start_line(1, _fake_env)
+        time.sleep(0.001)
+        _demo_profiler.end_line(1)
+
+        _demo_profiler.start_line(2, _fake_env)
+        time.sleep(0.0005)
+        _demo_profiler.end_line(2)
+
+    _demo_profiler.start_function_call("compute", caller=None)
+    _demo_profiler.start_line(5, {"result": 42})
+    time.sleep(0.002)
+    _demo_profiler.end_line(5)
+    _demo_profiler.end_function_call("compute")
+
+    _demo_profiler.start_function_call("factorial", caller=None)
+    _demo_profiler.start_function_call("factorial", caller="factorial")
+    _demo_profiler.end_function_call("factorial")
+    _demo_profiler.end_function_call("factorial")
+
+    _demo_profiler.stop()
+
+    _data = _demo_profiler.get_data()
+    print("=" * 50)
+    print("PROFILING RESULTS")
+    print("=" * 50)
+    print(f"Total time     : {_data.total_execution_time_ms:.3f} ms")
+    print(f"Lines executed : {_data.total_lines_executed}")
+    print(f"Peak memory    : {_data.peak_memory_bytes} bytes")
+    print(f"Complexity     : {_data.complexity_estimate}")
+    print()
+
+    print("LINE STATS:")
+    for _line, _ls in sorted(_data.line_stats.items()):
+        print(
+            f"  Line {_line}: {_ls.execution_count}x | "
+            f"total={_ls.total_time_ms:.3f}ms | "
+            f"avg={_ls.avg_time_ms:.3f}ms | "
+            f"min={_ls.min_time_ms:.3f}ms | "
+            f"max={_ls.max_time_ms:.3f}ms | "
+            f"mem={_ls.memory_bytes}B"
+        )
+
+    print()
+    print("FUNCTION STATS:")
+    for _fn, _fs in _data.function_stats.items():
+        print(
+            f"  {_fn}: {_fs.call_count} calls | "
+            f"total={_fs.total_time_ms:.3f}ms | "
+            f"max_depth={_fs.max_recursion_depth} | "
+            f"callers={_fs.callers}"
+        )
+
+    print()
+    print("SUMMARY:")
+
+
 if __name__ == "__main__":
+    main()
     _demo_profiler = Profiler()
     _demo_profiler.start()
 

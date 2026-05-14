@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .ast_nodes import (
+from ..core.ast_nodes import (
     ASTNode,
     AssignmentNode,
     TupleAssignmentNode,
@@ -40,12 +40,12 @@ from .ast_nodes import (
     UnaryOpNode,
     WhileNode,
 )
-from .lexer import tokenize
-from .models import ExecutionResult
-from .parser import parse
+from ..core.lexer import tokenize
+from ..types.models import ExecutionResult
+from ..core.parser import parse
 from .profiler import Profiler, ProfilingData
-from .semantic_analyzer import SemanticAnalyzer
-from .utils.errors import (
+from ..analysis.semantic_analyzer import SemanticAnalyzer
+from ..utils.errors import (
     ArgumentError,
     IndexError as OptiIndexError,
     KeyError as OptiKeyError,
@@ -59,7 +59,7 @@ from .utils.errors import (
     ValueError as OptiValueError,
     ZeroDivisionError as OptiZeroDivisionError,
 )
-from .utils.errors import LexerError
+from ..utils.errors import LexerError
 
 
 class _BreakSignal(Exception):
