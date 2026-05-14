@@ -1,35 +1,11 @@
-"""
-Optimization analysis engine for OptiLang.
+"""Optimization analysis engine for OptiLang.
 
-This single file contains:
-    - AST walker utility            (_walk)
-    - All 10 pattern detectors      (one function per pattern)
-    - The Optimizer orchestrator    (Optimizer class)
-    - Public convenience functions  (analyze, analyze_source)
+Pattern registry:
+    Static (AST only): unused_vars, dead_code, constant_folding, early_return
+    Hybrid (AST + profiling): loop_invariant, string_concat, nested_loops
+    Dynamic (profiling primary): hot_loops, repeated_computation, expensive_calls
 
-Pattern registry
-----------------
-Static  — AST + symbol table only, no execution needed:
-    1.  detect_unused_vars          symbol table lookup
-    2.  detect_dead_code            CFG reachability on AST blocks
-    3.  detect_constant_folding     AST pattern matching + constant propagation
-    4.  detect_early_return         guard clause detection
-
-Hybrid  — AST structure + profiling data for severity scaling:
-    5.  detect_loop_invariant       loop variable analysis (reaching definitions)
-    6.  detect_string_concat        anti-pattern matching
-    7.  detect_nested_loops         nesting depth tracking + execution count
-
-Dynamic — profiling data primary, AST for structural context:
-    8.  detect_hot_loops            execution frequency thresholding
-    9.  detect_repeated_computation expression fingerprinting
-    10. detect_expensive_calls      call frequency analysis
-
-Note on tuning
---------------
-All numeric thresholds (HOT_MULTIPLIER, LOOP_COUNT_THRESHOLD, etc.) are
-empirically tuned on benchmark programs (loops, recursion, nested structures).
-See CONTRIBUTING.md for the tuning guide.
+Tuning: See CONTRIBUTING.md for threshold tuning guide.
 """
 
 from __future__ import annotations
@@ -37,7 +13,33 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 
-from .ast_nodes import (
+__all__ = [
+    "Optimizer",
+    "analyze",
+    "analyze_source",
+    "detect_unused_vars",
+    "detect_dead_code",
+    "detect_constant_folding",
+    "detect_early_return",
+    "detect_loop_invariant",
+    "detect_string_concat",
+    "detect_nested_loops",
+    "detect_hot_loops",
+    "detect_repeated_computation",
+    "detect_expensive_calls",
+    # Internal helpers for tests
+    "_UNRESOLVED",
+    "_build_const_map",
+    "_fold",
+    "_fp",
+    "_innermost_count",
+    "_nontrivial",
+    "_repr_node",
+    "_resolve",
+    "_walk",
+]
+
+from ..core.ast_nodes import (
     ASTNode,
     AssignmentNode,
     AugmentedAssignmentNode,
@@ -60,8 +62,8 @@ from .ast_nodes import (
     UnaryOpNode,
     WhileNode,
 )
-from .models import OptimizationReport, Suggestion
-from .profiler import ProfilingData
+from ..types.models import OptimizationReport, Suggestion
+from ..runtime.profiler import ProfilingData
 import logging
 
 _log = logging.getLogger(__name__)
@@ -1189,7 +1191,7 @@ def analyze_source(source: str) -> OptimizationReport:
         for s in report.suggestions:
             print(f"Line {s.line} [{s.severity}]: {s.description}")
     """
-    from .executor import execute as _execute
+    from ..runtime.executor import execute as _execute
 
     result = _execute(source)
     ast = result.ast

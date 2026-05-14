@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .ast_nodes import (
+from ..core.ast_nodes import (
     ASTNode,
     AssignmentNode,
     AugmentedAssignmentNode,

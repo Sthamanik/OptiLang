@@ -1,96 +1,13 @@
-"""
-optilang/scoring.py
--------------------
-Scoring system for OptiLang.
+"""Scoring system for OptiLang - calculates optimization score (0-100).
 
-Calculates an overall optimization score (0–100) across four dimensions:
+Dimensions:
+    Correctness: 35 (error density)
+    Efficiency: 15 (optimizer patterns: hot_loop, loop_invariant, etc.)
+    Complexity: 15 (Big-O class coverage)
+    Quality: 20 (runtime patterns: dead_code, string_concat)
+    Maintainability: 15 (style patterns: unused_vars, early_return)
 
-    Dimension               Max     Source
-    ────────────────────────────
-    Correctness              35     result.errors
-    Efficiency + Complexity  30     complexity: Big-O class (15)
-                                    efficiency: optimizer patterns (15)
-    Quality                  20     optimizer suggestions (runtime patterns)
-    Maintainability          15     optimizer suggestions (style patterns)
-    ────────────────────────────
-    Total                   100
-
-Design principles:
-    - Score-earned model: each dimension contributes positively (not penalty-based).
-    - Dynamic scoring: calculations are relative to the program being analysed,
-      not fixed global thresholds. A 5-line program and a 50-line program are
-      judged on their own terms.
-    - Graceful degradation: if profiling or optimizer data is unavailable,
-      partial credit (~50 % of max) is awarded for that dimension rather than
-      zero, reflecting genuine uncertainty rather than failure.
-    - Smooth scoring: linear interpolation between density anchor points
-      prevents score cliffs where two nearly identical programs score very
-      differently because they straddle a fixed band boundary.
-
-Dimension breakdown:
-
-    Correctness (0–35)
-        Uses error density = errors / source_lines, fed through the same
-        linear-interpolated density-to-score function as Quality and
-        Maintainability. A 100-line program with 4 errors (density 0.04)
-        is judged far more leniently than a 5-line program with 3 errors
-        (density 0.60). Zero errors always yields full marks (35.0).
-
-    Efficiency + Complexity (0–30), two independent sub-scores:
-
-        Complexity sub-score (0–15)
-            Coverage-weighted: base_points × hot_coverage +
-                               15.0 × (1 - hot_coverage)
-            where hot_coverage = hot_lines / total_lines and hot_lines are
-            those executing more than sqrt(max_count) times.
-            A tiny quadratic loop in a 200-line program barely dents the
-            score; a program that is quadratic wall-to-wall pays the full
-            penalty. O(1) and O(log n) always return 15.0.
-            Requires profiling data; falls back to PARTIAL_COMPLEXITY (7.0).
-
-        Efficiency sub-score (0–15)
-            Sourced from optimizer suggestions in EFFICIENCY_PATTERNS:
-                hot_loop, loop_invariant, repeated_computation, expensive_calls.
-            Uses linear-interpolated density scoring.
-            Measures WHETHER THE PROGRAM AVOIDS UNNECESSARY WORK within its
-            complexity class.
-            Requires optimizer data; falls back to PARTIAL_EFFICIENCY (8.0).
-
-            The two sub-scores are genuinely independent:
-                - O(n) complexity but loop-invariant recomputed every iteration
-                  → good complexity sub-score, poor efficiency sub-score.
-                - O(n²) nested loop with no wasted work per iteration
-                  → poor complexity sub-score, good efficiency sub-score.
-
-    Quality (0–20)
-        From optimizer suggestions that affect runtime behaviour beyond loop
-        structure: dead_code, string_concat_loop.
-        Linear-interpolated weighted density, mapped to 0–20.
-
-    Maintainability (0–15)
-        From optimizer suggestions that affect readability and structural
-        clarity: unused_vars, early_return, nested_loops, constant_folding.
-        constant_folding belongs here (not Quality) because it is a write-time
-        concern — replacing '3 * 4' with '12' is a code-clarity improvement,
-        not a runtime fix.
-        Linear-interpolated weighted density, mapped to 0–15.
-
-Fixes applied vs. previous version:
-    1. optimizer_partial flag now set correctly when efficiency sub-score
-       falls back to partial credit (optimizer absent).
-    2. Partial-credit narrative notes accurately describe which sub-scores
-       were affected and why, including the cascading effect when both
-       profiling and optimizer data are absent.
-    3. constant_folding moved from QUALITY_PATTERNS → MAINTAINABILITY_PATTERNS
-       (write-time concern, not runtime behaviour).
-    4. Maintainability narrative hint now explicitly mentions early_return
-       and constant_folding, matching the patterns actually detected.
-    5. Correctness scale smoothed: 35/25/15/5/0 across 0/1/2/3/4+ errors,
-       eliminating the previous 25-point cliff for a single error.
-    6. _density_to_score replaced step bands with linear interpolation between
-       anchor points, eliminating score cliffs at band boundaries.
-    7. _lowest_dimension tie-breaks by highest dimension max (most room to
-       improve) instead of relying on arbitrary dict key ordering.
+Uses linear interpolation and graceful degradation (partial credit on missing data).
 """
 
 from __future__ import annotations
@@ -99,8 +16,33 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+__all__ = [
+    "Scorer",
+    "ScoreReport",
+    "DimensionScores",
+    "calculate_score",
+    "EFFICIENCY_PATTERNS",
+    "QUALITY_PATTERNS",
+    "MAINTAINABILITY_PATTERNS",
+    "COMPLEXITY_POINTS",
+    "MAX_QUALITY",
+    "MAX_MAINTAINABILITY",
+    "PARTIAL_COMPLEXITY",
+    "PARTIAL_EFFICIENCY",
+    "PARTIAL_MAINTAINABILITY",
+    "PARTIAL_QUALITY",
+    # Internal helpers for tests
+    "_assign_grade",
+    "_build_dimension_hint",
+    "_coverage_weighted_complexity",
+    "_density_to_score",
+    "_detect_complexity",
+    "_generate_narrative",
+    "_rank_dimensions",
+]
+
 from .complexity import analyze_complexity as static_analyze_complexity
-from .constants import COMPLEXITY_POINTS
+from ..types.constants import COMPLEXITY_POINTS
 
 # ---------------------------------------------------------------------------
 # Pattern classification
@@ -297,7 +239,7 @@ def _detect_complexity(line_stats: Dict[str, Any]) -> str:
         "O(n²)", "O(n³)", "O(n^k)", "O(2^n)", "O(n^3) or worse"
     """
     # Convert dict format from scoring to profiler format
-    from .profiler import LineStats, detect_complexity_with_confidence
+    from ..runtime.profiler import LineStats, detect_complexity_with_confidence
 
     profiler_stats: Dict[int, LineStats] = {}
     for line_num, stats in line_stats.items():
