@@ -23,19 +23,32 @@ from pathlib import Path
 
 import pytest
 
-from optilang import execute
-from optilang.profiler import (
+import optilang
+from optilang import (
     FunctionStats,
     LineStats,
     Profiler,
     ProfilerConfig,
     ProfilingData,
-    _estimate_deep_object_size,
     _safe_getsizeof,
+    _estimate_deep_object_size,
     detect_complexity,
     detect_complexity_with_confidence,
     estimate_memory_bytes,
     profile_execution,
+    execute,
+)
+from optilang.core.lexer import tokenize
+from optilang.core.parser import parse
+from optilang.runtime import profiler as runtime_profiler
+from optilang.runtime.profiler import (
+    _analyze_execution_pattern,
+    _analyze_nested_loops,
+    _count_loop_iterations_at_depth,
+    _detect_algorithm_pattern,
+    _detect_recursion_and_complexity,
+    _get_max_loop_depth_from_ast,
+    _infer_complexity_from_depth_counts,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +142,7 @@ class TestEstimateMemoryBytes:
         def boom(value: object) -> int:
             raise TypeError("boom")
 
-        monkeypatch.setattr("optilang.profiler.sys.getsizeof", boom)
+        monkeypatch.setattr("optilang.runtime.profiler.sys.getsizeof", boom)
         assert _safe_getsizeof(object()) == 28
 
     def test_deep_mode_handles_cycles(self) -> None:
@@ -1166,7 +1179,7 @@ class TestProfilerModuleScript:
     def test_run_as_module_subprocess(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(
-            [sys.executable, "-m", "optilang.profiler"],
+            [sys.executable, "-m", "optilang.runtime.profiler"],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -1177,7 +1190,9 @@ class TestProfilerModuleScript:
         assert "PROFILING RESULTS" in completed.stdout
         assert "SUMMARY:" in completed.stdout
 
-    @pytest.mark.skip(reason="profiler.py uses relative imports which fail when run as script")
+    @pytest.mark.skip(
+        reason="profiler.py uses relative imports which fail when run as script"
+    )
     def test_run_as_module_runpy(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         profiler_path = repo_root / "optilang" / "profiler.py"
@@ -1188,3 +1203,174 @@ class TestProfilerModuleScript:
         assert "PROFILING RESULTS" in output
         assert "LINE STATS:" in output
         assert "FUNCTION STATS:" in output
+
+
+class TestProfilerCompatibilityAndBranches:
+    """Tests for compatibility exports, entrypoints, and complexity helpers."""
+
+    def parse_source(self, source: str):
+        return parse(tokenize(source))
+
+    def test_package_getattr_supports_profiler_and_unknown_names(self) -> None:
+        assert optilang.__getattr__("profiler") is runtime_profiler
+        with pytest.raises(AttributeError):
+            optilang.__getattr__("definitely_missing")
+
+    def test_profiler_package_exports_runtime_symbols(self) -> None:
+        profiler_pkg = __import__("optilang.profiler", fromlist=["Profiler"])
+        assert profiler_pkg.Profiler is runtime_profiler.Profiler
+        assert "Profiler" in profiler_pkg.__all__
+        assert profiler_pkg.sys is not None
+
+    def test_module_entrypoints_call_runtime_main(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        called: list[str] = []
+
+        def fake_main() -> None:
+            called.append("main")
+
+        monkeypatch.setattr(runtime_profiler, "main", fake_main)
+        runpy.run_module("optilang.profiler.__main__", run_name="__main__")
+        runpy.run_module("optilang.runtime.__main__", run_name="__main__")
+        assert called == ["main", "main"]
+
+    def test_runtime_profiler_main_prints_summary(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(runtime_profiler.time, "sleep", lambda _seconds: None)
+        runtime_profiler.main()
+        output = capsys.readouterr().out
+        assert "PROFILING RESULTS" in output
+        assert "LINE STATS:" in output
+        assert "FUNCTION STATS:" in output
+        assert "SUMMARY:" in output
+
+    def test_profile_execution_wraps_keyword_only_executor(self) -> None:
+        def executor(code: str, *, profiler: runtime_profiler.Profiler) -> str:
+            profiler.start_line(1, {"code": code})
+            profiler.end_line(1)
+            return code.upper()
+
+        result, data = profile_execution(executor, "abc")
+        assert result == "ABC"
+        assert data.total_lines_executed == 1
+
+    def test_memory_estimation_deep_mode_clamps_negative_limits(self) -> None:
+        assert (
+            estimate_memory_bytes({"x": [1, 2, 3]}, mode="deep", deep_max_depth=-5) > 0
+        )
+
+    def test_execution_pattern_empty_active_and_quadratic_branches(self) -> None:
+        assert _analyze_execution_pattern({})["pattern"] == "empty"
+        inactive = {1: LineStats(line_number=1, execution_count=0)}
+        assert _analyze_execution_pattern(inactive)["pattern"] == "empty"
+        quadratic = {
+            1: LineStats(line_number=1, execution_count=1),
+            2: LineStats(line_number=2, execution_count=10),
+            3: LineStats(line_number=3, execution_count=100),
+            4: LineStats(line_number=4, execution_count=100),
+        }
+        assert _analyze_execution_pattern(quadratic)["pattern"] == "quadratic"
+
+    def test_ast_complexity_branches_for_recursion_and_loops(self) -> None:
+        tree = self.parse_source("""
+def fib(n):
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+""")
+        complexity, confidence = _detect_recursion_and_complexity(tree, {})
+        assert complexity == "O(2^n)"
+        assert confidence == pytest.approx(0.90)
+
+        nested = self.parse_source("""
+for i in range(n):
+    while j > 1:
+        j = j // 2
+""")
+        assert _get_max_loop_depth_from_ast(nested) == 2
+        stats = {
+            2: LineStats(line_number=2, execution_count=3),
+            3: LineStats(line_number=3, execution_count=12),
+        }
+        detected, confidence = detect_complexity_with_confidence(stats, ast=nested)
+        assert detected == "O(n log n)"
+        assert confidence == pytest.approx(0.85)
+
+    def test_algorithm_pattern_detects_logarithmic_loops(self) -> None:
+        assert _detect_algorithm_pattern(
+            self.parse_source("while n > 1:\n    n //= 2")
+        ) == ("binary_exponentiation")
+        assert _detect_algorithm_pattern(self.parse_source("while b:\n    b %= a")) == (
+            "euclidean_gcd"
+        )
+        assert _detect_algorithm_pattern(
+            self.parse_source("while high:\n    mid = high // 2")
+        ) == ("binary_search")
+        assert _detect_algorithm_pattern(self.parse_source("x = 1")) is None
+
+    def test_depth_and_ast_pattern_helpers(self) -> None:
+        tree = self.parse_source("""
+for i in range(n):
+    for j in range(n):
+        total = i + j
+""")
+        stats = {
+            1: LineStats(line_number=1, execution_count=1),
+            2: LineStats(line_number=2, execution_count=5),
+            3: LineStats(line_number=3, execution_count=25),
+        }
+        depth_counts = _count_loop_iterations_at_depth(stats, tree)
+        assert depth_counts[1] == 5
+        assert depth_counts[2] == 25
+        assert depth_counts[0] == 1
+        assert _infer_complexity_from_depth_counts({}, 0) == ("O(1)", 0.95)
+        assert _infer_complexity_from_depth_counts({0: 1}, 0) == ("O(1)", 0.95)
+        assert _infer_complexity_from_depth_counts({1: 2, 2: 1}, 2) == (
+            "O(n)",
+            0.75,
+        )
+        assert _infer_complexity_from_depth_counts({1: 1, 2: 2}, 2) == (
+            "O(n²)",
+            0.88,
+        )
+        assert _infer_complexity_from_depth_counts({1: 2, 2: 2}, 2) == (
+            "O(n²)",
+            0.80,
+        )
+        assert _infer_complexity_from_depth_counts({1: 3}, 1) == ("O(n)", 0.70)
+        assert _infer_complexity_from_depth_counts({3: 10}, 3) == ("O(n^k)", 0.85)
+        assert _analyze_nested_loops(None) is None
+        assert _analyze_nested_loops(tree) == "n2"
+
+    def test_detect_complexity_ast_depth_and_count_branches(self) -> None:
+        stats = {1: LineStats(line_number=1, execution_count=2)}
+        assert detect_complexity_with_confidence(stats, max_loop_depth=5) == (
+            "O(n^k)",
+            0.90,
+        )
+        assert detect_complexity_with_confidence(stats, max_loop_depth=4) == (
+            "O(n⁴)",
+            0.85,
+        )
+        assert detect_complexity_with_confidence(stats, max_loop_depth=3) == (
+            "O(n³)",
+            0.85,
+        )
+        assert detect_complexity_with_confidence(stats, max_loop_depth=1)[0] == "O(n)"
+
+        nlogn_stats = {
+            1: LineStats(line_number=1, execution_count=10),
+            2: LineStats(line_number=2, execution_count=10),
+            3: LineStats(line_number=3, execution_count=10),
+        }
+        assert detect_complexity_with_confidence(nlogn_stats)[0] == "O(n log n)"
+
+        quadratic_stats = {
+            1: LineStats(line_number=1, execution_count=1),
+            2: LineStats(line_number=2, execution_count=10),
+            3: LineStats(line_number=3, execution_count=100),
+            4: LineStats(line_number=4, execution_count=100),
+        }
+        assert detect_complexity_with_confidence(quadratic_stats)[0] == "O(n²)"

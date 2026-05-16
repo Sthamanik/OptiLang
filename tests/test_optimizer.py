@@ -52,7 +52,7 @@ from optilang.optimizer import (
     detect_unused_vars,
 )
 from optilang.parser import parse
-from optilang.profiler import FunctionStats, LineStats, ProfilingData
+from optilang import FunctionStats, LineStats, ProfilingData
 
 
 # Shared helpers
@@ -400,7 +400,7 @@ class TestHotLoopsExtended:
         # line (line 2) to count=15_000.
         # mean ≈ (999 + 15000) / 1000 ≈ 16  →  threshold = 1000
         # 15_000 > 1000 * 10 = 10_000  →  HIGH ✓
-        from optilang.profiler import LineStats
+        from optilang import LineStats
 
         src = "for i in range(15000):\n    x = i * 2\nprint(x)"
         ast, profiling, st = _run(src)
@@ -423,7 +423,7 @@ class TestHotLoopsExtended:
         # so 5000 exceeds hot_threshold.
         # mean ≈ (999 + 5000) / 1000 ≈ 6  →  threshold = max(60, 1000) = 1000
         # 5000 > 1000 → MEDIUM ✓
-        from optilang.profiler import LineStats
+        from optilang import LineStats
 
         src = (
             "i = 0\n" "while i < 5000:\n" "    x = i * 2\n" "    i = i + 1\n" "print(x)"
@@ -444,7 +444,7 @@ class TestHotLoopsExtended:
 
     def test_empty_profiling_line_stats_returns_empty(self) -> None:
         # No lines profiled — counts list is empty → return []
-        from optilang.profiler import Profiler
+        from optilang import Profiler
 
         profiler = Profiler()
         profiler.start()
@@ -581,10 +581,10 @@ class TestExpensiveCallsExtended:
     def test_expensive_function_with_no_call_site_in_ast(self) -> None:
         # profiling reports a function as expensive but it has no call site
         # in the AST (e.g. it was called dynamically) — should return empty
-        from optilang.profiler import FunctionStats
+        from optilang import FunctionStats
 
         ast = _parse("x = 1\nprint(x)")
-        from optilang.profiler import Profiler
+        from optilang import Profiler
 
         profiler = Profiler()
         profiler.start()

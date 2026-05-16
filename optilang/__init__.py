@@ -52,7 +52,19 @@ from .runtime.executor import Executor, execute
 from .types.models import ExecutionResult, OptimizationReport, Suggestion
 from .analysis.optimizer import Optimizer, analyze, analyze_source
 from .core.parser import parse
-from .runtime.profiler import ProfilingData
+from .runtime.profiler import (
+    ProfilingData,
+    FunctionStats,
+    LineStats,
+    Profiler,
+    ProfilerConfig,
+    _safe_getsizeof,
+    _estimate_deep_object_size,
+    detect_complexity,
+    detect_complexity_with_confidence,
+    estimate_memory_bytes,
+    profile_execution,
+)
 from .analysis.scoring import (
     EFFICIENCY_PATTERNS,
     MAINTAINABILITY_PATTERNS,
@@ -89,6 +101,16 @@ __all__ = [
     "ScoreReport",
     "DimensionScores",
     "ProfilingData",
+    "FunctionStats",
+    "LineStats",
+    "Profiler",
+    "ProfilerConfig",
+    "detect_complexity",
+    "detect_complexity_with_confidence",
+    "estimate_memory_bytes",
+    "profile_execution",
+    "_safe_getsizeof",
+    "_estimate_deep_object_size",
     # ── Pattern classification constants ──
     "EFFICIENCY_PATTERNS",
     "QUALITY_PATTERNS",

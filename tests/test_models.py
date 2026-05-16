@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
+from optilang import ProfilingData
 from optilang.models import ExecutionResult, OptimizationReport, Suggestion
-from optilang.profiler import ProfilingData
 from optilang.token import Token, TokenType
 
 # ---------------------------------------------------------------------------
