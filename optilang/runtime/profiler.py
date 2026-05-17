@@ -10,7 +10,6 @@ This module provides line-by-line profiling during code execution, collecting:
 - High-level summary for web API consumption
 """
 
-import json
 import math
 import random
 import sys
@@ -53,6 +52,7 @@ from ..types.constants import (
     COMPLEXITY_NK,
     COMPLEXITY_NLOGN,
     COMPLEXITY_O1,
+    COMPLEXITY_UNKNOWN,
 )
 
 
@@ -159,6 +159,12 @@ class ProfilingData:
     complexity_estimate: str = "O(1)"  # detected time complexity class
     complexity_method: str = "heuristic"
     complexity_confidence: float = 1.0
+    complexity_display: Optional[str] = None
+    complexity_worst_case: Optional[str] = None
+    complexity_best_case: Optional[str] = None
+    complexity_bound_symbols: List[str] = field(default_factory=list)
+    complexity_has_early_exit: bool = False
+    complexity_fallback_reason: Optional[str] = None
     sampled_lines: int = 0
     skipped_lines: int = 0
     line_sampling_rate: float = 1.0
@@ -182,6 +188,13 @@ class ProfilingData:
             "complexity_estimate": self.complexity_estimate,
             "complexity_method": self.complexity_method,
             "complexity_confidence": round(self.complexity_confidence, 3),
+            "complexity_display": self.complexity_display or self.complexity_estimate,
+            "complexity_worst_case": self.complexity_worst_case
+            or self.complexity_estimate,
+            "complexity_best_case": self.complexity_best_case,
+            "complexity_bound_symbols": self.complexity_bound_symbols,
+            "complexity_has_early_exit": self.complexity_has_early_exit,
+            "complexity_fallback_reason": self.complexity_fallback_reason,
             "sampled_lines": self.sampled_lines,
             "skipped_lines": self.skipped_lines,
             "line_sampling_rate": self.line_sampling_rate,
@@ -1047,18 +1060,56 @@ class Profiler:
         self.data.total_lines_executed = sum(
             s.execution_count for s in self.data.line_stats.values()
         )
-        complexity, confidence = detect_complexity_with_confidence(
-            self.data.line_stats,
-            max_loop_depth=max_loop_depth,
-            ast=ast,
-        )
+        method = "empirical"
+        display_complexity: Optional[str] = None
+        worst_case: Optional[str] = None
+        best_case: Optional[str] = None
+        bound_symbols: List[str] = []
+        has_early_exit = False
+        fallback_reason: Optional[str] = None
+
+        if ast is not None:
+            from ..analysis.complexity import analyze_complexity
+
+            static_result = analyze_complexity(ast)
+            if static_result.complexity == COMPLEXITY_UNKNOWN:
+                fallback_reason = static_result.fallback_reason
+                complexity, confidence = detect_complexity_with_confidence(
+                    self.data.line_stats,
+                    max_loop_depth=max_loop_depth,
+                    ast=None,
+                )
+                method = "empirical"
+            else:
+                complexity = static_result.complexity
+                confidence = static_result.confidence
+                method = static_result.method
+                display_complexity = static_result.display_complexity
+                worst_case = static_result.worst_case
+                best_case = static_result.best_case
+                bound_symbols = static_result.bound_symbols
+                has_early_exit = static_result.has_early_exit
+                fallback_reason = static_result.fallback_reason
+        else:
+            complexity, confidence = detect_complexity_with_confidence(
+                self.data.line_stats,
+                max_loop_depth=max_loop_depth,
+                ast=None,
+            )
         sampling_rate = self.config.normalized_sampling_rate()
         sampling_adjusted_confidence = confidence * (0.5 + (0.5 * sampling_rate))
         self.data.complexity_estimate = complexity
-        self.data.complexity_method = "heuristic"
+        self.data.complexity_method = method
         self.data.complexity_confidence = max(
-            0.05, min(0.99, sampling_adjusted_confidence)
+            0.0 if complexity == COMPLEXITY_UNKNOWN else 0.05,
+            min(1.0 if method in {"static", "unbounded"} else 0.99, sampling_adjusted_confidence),
         )
+        self.data.complexity_display = display_complexity or complexity
+        self.data.complexity_worst_case = worst_case or complexity
+        self.data.complexity_best_case = best_case
+        self.data.complexity_bound_symbols = bound_symbols
+        self.data.complexity_has_early_exit = has_early_exit
+        self.data.complexity_fallback_reason = fallback_reason
 
     # ── Line Profiling ──
 
@@ -1303,6 +1354,14 @@ class Profiler:
             "complexity_estimate": self.data.complexity_estimate,
             "complexity_method": self.data.complexity_method,
             "complexity_confidence": round(self.data.complexity_confidence, 3),
+            "complexity_display": self.data.complexity_display
+            or self.data.complexity_estimate,
+            "complexity_worst_case": self.data.complexity_worst_case
+            or self.data.complexity_estimate,
+            "complexity_best_case": self.data.complexity_best_case,
+            "complexity_bound_symbols": self.data.complexity_bound_symbols,
+            "complexity_has_early_exit": self.data.complexity_has_early_exit,
+            "complexity_fallback_reason": self.data.complexity_fallback_reason,
             "functions_called": len(self.data.function_stats),
             "total_function_calls": sum(
                 f.call_count for f in self.data.function_stats.values()

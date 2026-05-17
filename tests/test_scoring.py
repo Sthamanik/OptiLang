@@ -413,6 +413,7 @@ class TestComplexityDetection:
         expected_classes = {
             "O(1)", "O(log n)", "O(n)", "O(n log n)",
             "O(n²)", "O(n² log n)", "O(n³)", "O(n⁴)", "O(n^k)", "O(2^n)",
+            "O(k^n)", "O(n!)", "O(n + m)", "O(n*m)", "O(?)", "O(∞)",
         }
         assert set(COMPLEXITY_POINTS.keys()) == expected_classes
 
@@ -425,7 +426,8 @@ class TestComplexityDetection:
     def test_better_complexity_earns_more_points(self) -> None:
         """Lower-complexity classes must score at least as many points."""
         order = ["O(1)", "O(log n)", "O(n)", "O(n log n)",
-                 "O(n²)", "O(n³)", "O(n⁴)", "O(n^k)", "O(2^n)"]
+                 "O(n²)", "O(n³)", "O(n⁴)", "O(n^k)", "O(2^n)",
+                 "O(k^n)", "O(n!)", "O(∞)"]
         for i in range(len(order) - 1):
             assert COMPLEXITY_POINTS[order[i]] >= COMPLEXITY_POINTS[order[i + 1]], (
                 f"{order[i]} should score ≥ {order[i + 1]}"
@@ -718,7 +720,7 @@ class TestPartialCredit:
         )
         assert sr.dimensions.complexity_subscore == PARTIAL_COMPLEXITY
         assert sr.dimensions.profiling_partial is True
-        assert sr.complexity_class == "Unknown"
+        assert sr.complexity_class == "O(?)"
 
     def test_no_profiling_does_not_affect_efficiency_sub(self) -> None:
         """Efficiency sub-score comes from the optimizer, not profiling."""
@@ -1530,7 +1532,7 @@ class TestCalculateScoreAPI:
             assert 0.0 <= sr.score <= 100.0, f"Score out of range: {sr.score}"
 
     def test_complexity_class_in_known_set(self) -> None:
-        known = set(COMPLEXITY_POINTS.keys()) | {"Unknown"}
+        known = set(COMPLEXITY_POINTS.keys()) | {"Unknown", "O(?)"}
         sr = calculate_score(
             profiling_data={"line_stats": _make_line_stats(1, 100, 100, 1)},
             optimizer_report=_clean_report(),

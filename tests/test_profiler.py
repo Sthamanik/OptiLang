@@ -40,6 +40,9 @@ from optilang import (
 )
 from optilang.core.lexer import tokenize
 from optilang.core.parser import parse
+from optilang.analysis.complexity import analyze_complexity
+from optilang.analysis.optimizer import analyze
+from optilang.analysis.scoring import calculate_score
 from optilang.runtime import profiler as runtime_profiler
 from optilang.runtime.profiler import (
     _analyze_execution_pattern,
@@ -669,7 +672,7 @@ class TestProfilerDirect:
         assert summary["total_lines_executed"] == 3
         assert summary["unique_lines_profiled"] == 3
         assert summary["complexity_estimate"] == "O(1)"
-        assert summary["complexity_method"] == "heuristic"
+        assert summary["complexity_method"] == "empirical"
         assert 0.0 <= summary["complexity_confidence"] <= 1.0
         assert isinstance(summary["hottest_lines"], list)
         assert isinstance(summary["hottest_functions"], list)
@@ -790,13 +793,38 @@ class TestProfilerIntegration:
         counts = [s.execution_count for s in result.profiling.line_stats.values()]
         assert max(counts) >= 50
 
-    def test_execute_nested_loop_detected_as_quadratic(self) -> None:
+    def test_execute_literal_nested_loop_detected_as_constant(self) -> None:
         result = execute(
             "for i in range(100):\n" "    for j in range(100):\n" "        x = i * j"
         )
         assert result.profiling is not None
         complexity = result.profiling.complexity_estimate
-        assert complexity in ("O(n²)", "O(n log n)")
+        assert complexity == "O(1)"
+
+    def test_static_profiler_and_score_share_canonical_class(self) -> None:
+        source = "n = 5\nfor i in range(n):\n    for j in range(n):\n        x = i + j"
+        ast = parse(tokenize(source))
+        result = execute(source)
+        assert result.profiling is not None
+        static = analyze_complexity(ast)
+        report = analyze(ast, result.profiling, result.symbol_table)
+        score = calculate_score(
+            result.profiling.to_dict(),
+            report,
+            source.count("\n") + 1,
+            result.errors,
+            ast=ast,
+        )
+        assert static.complexity == result.profiling.complexity_estimate
+        assert result.profiling.complexity_estimate == score.complexity_class
+
+    def test_unbounded_static_result_does_not_use_empirical_fallback(self) -> None:
+        ast = parse(tokenize("while True:\n    x = 1"))
+        profiler = Profiler()
+        profiler.start()
+        profiler.stop(ast=ast)
+        assert profiler.data.complexity_estimate == "O(∞)"
+        assert profiler.data.complexity_method == "unbounded"
 
     def test_execute_simple_program_detected_as_O1(self) -> None:
         result = execute("x = 1\ny = 2\nz = x + y")

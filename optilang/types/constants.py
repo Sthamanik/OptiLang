@@ -16,7 +16,13 @@ COMPLEXITY_N2LOGN = "O(n² log n)"
 COMPLEXITY_N3 = "O(n³)"
 COMPLEXITY_N4 = "O(n⁴)"
 COMPLEXITY_NK = "O(n^k)"
+COMPLEXITY_KN = "O(k^n)"
 COMPLEXITY_EXP = "O(2^n)"
+COMPLEXITY_NF = "O(n!)"
+COMPLEXITY_N_PLUS_M = "O(n + m)"
+COMPLEXITY_N_M = "O(n*m)"
+COMPLEXITY_UNKNOWN = "O(?)"
+COMPLEXITY_UNBOUNDED = "O(∞)"
 COMPLEXITY_N3_PLUS = "O(n^3) or worse"
 
 
@@ -32,7 +38,13 @@ COMPLEXITY_POINTS: dict[str, float] = {
     COMPLEXITY_N3: 3.0,
     COMPLEXITY_N4: 2.0,
     COMPLEXITY_NK: 1.0,
+    COMPLEXITY_KN: 0.0,
     COMPLEXITY_EXP: 0.0,
+    COMPLEXITY_NF: 0.0,
+    COMPLEXITY_N_PLUS_M: 11.0,
+    COMPLEXITY_N_M: 6.0,
+    COMPLEXITY_UNKNOWN: 7.0,
+    COMPLEXITY_UNBOUNDED: 0.0,
     # Note: COMPLEXITY_N3_PLUS is defined above but not included here
     # because it's only used as a fallback label, not a scored class
 }

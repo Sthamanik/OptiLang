@@ -612,8 +612,8 @@ class TestLoops:
         )
         program = ProgramNode(statements=[for_node], line=1, column=1)
         result = analyze_complexity(program)
-        # Returns O(3) for 3-element list, or O(n) for general case
-        assert result.complexity in ["O(n)", "O(3)"]
+        # Literal lists have fixed write-time size, so iteration is constant.
+        assert result.complexity == "O(1)"
 
     def test_while_loop_with_increment(self) -> None:
         assign_i = AssignmentNode(
@@ -1651,11 +1651,13 @@ class TestRangeComplexity:
         # Wrap in ProgramNode for analyze_complexity
         program = ProgramNode(statements=[outer_for], line=1, column=1)
         result = analyze_complexity(program)
-        # Should have nested loops - O(n²) or higher
+        # The inner bound depends on the outer loop iterator, so the analyzer
+        # preserves the independent bound expression.
         assert result.complexity in [
             "O(n²)",
             "O(n log n)",
             "O(n)",
+            "O(n*m)",
             "Unknown",
             "O(limit²)",
         ]
@@ -3255,7 +3257,7 @@ class TestComplexityAnalyzerBranchCoverage:
         assert analyzer._complexity_to_big_o(Factorial(Var("items")))[0] == "O(n!)"
         assert analyzer._complexity_to_big_o(Add(Const(1), Param("n")))[0] == "O(n)"
         assert analyzer._complexity_to_big_o(Add(Param("n"), Const(1)))[0] == "O(n)"
-        assert analyzer._complexity_to_big_o(object())[0] == "Unknown"
+        assert analyzer._complexity_to_big_o(object())[0] == "O(?)"
         assert analyzer._complexity_to_big_o(Mul(Param("n"), Log(Param("n"))))[0] == (
             "O(n log n)"
         )
@@ -3305,7 +3307,7 @@ permute(n)
         analyzer._extract_params({"items": [1, 2, 3], "fn": lambda: None})
         assert "items" in analyzer._params
         assert "fn" not in analyzer._params
-        assert analyzer._analyze_node(StringNode(1, 1, "abcd")).value == 4
+        assert analyzer._analyze_node(StringNode(1, 1, "abcd")).value == 1
         assert (
             analyzer._analyze_node(
                 AssignmentNode(1, 1, IdentifierNode(1, 1, "x"), NumberNode(1, 5, 1))
@@ -3370,3 +3372,66 @@ permute(n)
             analyzer._check_node_for_factorial_pattern(if_node, "walk") == "factorial"
         )
         assert analyzer._detect_recursive_pattern(func) is None
+
+
+class TestCanonicalComplexityUpgrade:
+    """Golden tests for the canonical two-layer complexity vocabulary."""
+
+    def _analyze(self, source: str):
+        return analyze_complexity(parse(tokenize(source)))
+
+    def test_literal_bounds_are_constant(self) -> None:
+        result = self._analyze(
+            "for i in range(10):\n"
+            "    for j in range(10):\n"
+            "        x = i + j"
+        )
+        assert result.complexity == "O(1)"
+
+    def test_multi_variable_forms_are_preserved(self) -> None:
+        assert (
+            self._analyze("for i in range(n):\n    pass\nfor j in range(m):\n    pass").complexity
+            == "O(n + m)"
+        )
+        assert (
+            self._analyze("for i in range(n):\n    for j in range(m):\n        pass").complexity
+            == "O(n*m)"
+        )
+
+    def test_hidden_costs_escalate_inside_loop(self) -> None:
+        assert (
+            self._analyze("s = ''\nfor i in range(n):\n    s += str(i)").complexity
+            == "O(n²)"
+        )
+        assert (
+            self._analyze("for i in range(n):\n    x = arr[0:n]").complexity
+            == "O(n²)"
+        )
+
+    def test_recursion_classes(self) -> None:
+        fib = self._analyze(
+            "def fib(n):\n"
+            "    if n <= 1:\n"
+            "        return n\n"
+            "    return fib(n - 1) + fib(n - 2)\n"
+            "fib(5)"
+        )
+        assert fib.complexity == "O(2^n)"
+
+        three = self._analyze(
+            "def f(n):\n"
+            "    if n <= 0:\n"
+            "        return\n"
+            "    f(n - 1)\n"
+            "    f(n - 1)\n"
+            "    f(n - 1)\n"
+            "f(5)"
+        )
+        assert three.complexity == "O(k^n)"
+        assert three.display_complexity == "O(3^n)"
+
+    def test_unknown_and_unbounded_states(self) -> None:
+        assert self._analyze("while True:\n    x = 1").complexity == "O(∞)"
+        unknown = self._analyze("for i in range(n):\n    external(i)")
+        assert unknown.complexity == "O(?)"
+        assert unknown.fallback_reason is not None

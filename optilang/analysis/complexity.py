@@ -33,6 +33,7 @@ from ..core.ast_nodes import (
     IndexNode,
     IndexedAugmentedAssignmentNode,
     ListNode,
+    MethodCallNode,
     NumberNode,
     PassNode,
     ProgramNode,
@@ -43,6 +44,22 @@ from ..core.ast_nodes import (
     WhileNode,
     BreakNode,
     ContinueNode,
+)
+from ..types.constants import (
+    COMPLEXITY_EXP,
+    COMPLEXITY_KN,
+    COMPLEXITY_LOGN,
+    COMPLEXITY_N,
+    COMPLEXITY_N2,
+    COMPLEXITY_N3,
+    COMPLEXITY_NF,
+    COMPLEXITY_NK,
+    COMPLEXITY_NLOGN,
+    COMPLEXITY_N_M,
+    COMPLEXITY_N_PLUS_M,
+    COMPLEXITY_O1,
+    COMPLEXITY_UNBOUNDED,
+    COMPLEXITY_UNKNOWN,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +178,27 @@ class Factorial(ComplexityExpr):
     inner: ComplexityExpr  # Usually a Param
 
 
+@dataclass
+class Exponential(ComplexityExpr):
+    """O(k^n) — branching recursion."""
+
+    branch_factor: int = 2
+
+
+@dataclass
+class UnknownExpr(ComplexityExpr):
+    """O(?) — static analysis cannot safely classify this construct."""
+
+    reason: str = "Unresolvable complexity"
+
+
+@dataclass
+class InfiniteExpr(ComplexityExpr):
+    """O(∞) — statically unbounded loop."""
+
+    reason: str = "Unbounded loop"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Analysis result
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,6 +221,21 @@ class ComplexityResult:
     confidence: float
     explanation: str
     bound_symbol: Optional[str] = None
+    display_complexity: Optional[str] = None
+    method: str = "static"
+    bound_symbols: Optional[List[str]] = None
+    best_case: Optional[str] = None
+    worst_case: Optional[str] = None
+    has_early_exit: bool = False
+    fallback_reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.bound_symbols is None:
+            self.bound_symbols = [self.bound_symbol] if self.bound_symbol else []
+        if self.display_complexity is None:
+            self.display_complexity = self.complexity
+        if self.worst_case is None:
+            self.worst_case = self.complexity
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,6 +267,10 @@ class ComplexityAnalyzer:
         self._function_cache: Dict[str, ComplexityExpr] = {}
         # Track functions currently being analyzed (to detect cycles)
         self._analyzing: Set[str] = set()
+        self._loop_depth = 0
+        self._fallback_reason: Optional[str] = None
+        self._has_early_exit = False
+        self._best_case: Optional[str] = None
 
     def analyze(
         self,
@@ -234,6 +291,12 @@ class ComplexityAnalyzer:
         self._functions = {}
         self._params = set()
         self._loop_iterators = set()
+        self._function_cache = {}
+        self._analyzing = set()
+        self._loop_depth = 0
+        self._fallback_reason = None
+        self._has_early_exit = False
+        self._best_case = None
 
         # First pass: collect all function definitions
         self._collect_functions(program)
@@ -263,6 +326,10 @@ class ComplexityAnalyzer:
         """
         # Reset but preserve function definitions
         self._params = {p.name for p in func_def.parameters}
+        self._loop_depth = 0
+        self._fallback_reason = None
+        self._has_early_exit = False
+        self._best_case = None
 
         expr = self._analyze_block(func_def.body)
         return self._expr_to_result(expr)
@@ -350,8 +417,7 @@ class ComplexityAnalyzer:
         if isinstance(node, NumberNode):
             return Const(1)
         if isinstance(node, StringNode):
-            # String creation is O(n) where n is the string length
-            return Const(float(len(node.value)))
+            return Const(1)
         if isinstance(node, BooleanNode):
             return Const(1)
 
@@ -369,6 +435,21 @@ class ComplexityAnalyzer:
 
         # Augmented assignment: O(1) for the operation
         if isinstance(node, (AugmentedAssignmentNode, IndexedAugmentedAssignmentNode)):
+            if (
+                isinstance(node, AugmentedAssignmentNode)
+                and node.operator == "+="
+                and self._loop_depth > 0
+                and (
+                    isinstance(node.value, StringNode)
+                    or (
+                        isinstance(node.value, FunctionCallNode)
+                        and isinstance(node.value.function, IdentifierNode)
+                        and node.value.function.name == "str"
+                    )
+                )
+            ):
+                # String/list concatenation in a loop copies growing data.
+                return Var("n")
             return self._analyze_node(node.value)
 
         # Index assignment: O(1) for the assignment
@@ -377,6 +458,12 @@ class ComplexityAnalyzer:
 
         # Binary operations: O(max(children))
         if isinstance(node, BinaryOpNode):
+            if node.operator == "**":
+                if isinstance(node.left, NumberNode) and isinstance(
+                    node.right, IdentifierNode
+                ):
+                    return Log(Var(node.right.name))
+                return Const(1)
             left = self._analyze_node(node.left)
             right = self._analyze_node(node.right)
             return self._combine_max([left, right])
@@ -388,6 +475,9 @@ class ComplexityAnalyzer:
         # Function call: analyze function body or use call expression
         if isinstance(node, FunctionCallNode):
             return self._analyze_function_call(node)
+
+        if isinstance(node, MethodCallNode):
+            return self._analyze_method_call(node)
 
         # Indexing: O(1) for single element, O(n) for slicing
         if isinstance(node, IndexNode):
@@ -407,9 +497,7 @@ class ComplexityAnalyzer:
         # List literal: O(n) where n is number of elements
         if isinstance(node, ListNode):
             if node.elements:
-                # O(n) for creating the list
-                n = len(node.elements)
-                return Const(float(n))
+                return self._combine_max([self._analyze_node(e) for e in node.elements])
             return Const(1)
 
         # If statement: O(max of all branches)
@@ -465,7 +553,14 @@ class ComplexityAnalyzer:
         iter_complexity = self._extract_iterable_complexity(node.iterable)
 
         # Analyze the loop body
+        iterator_name = getattr(node.iterator, "name", "")
+        if iterator_name:
+            self._loop_iterators.add(iterator_name)
+        self._loop_depth += 1
         body_complexity = self._analyze_block(node.body)
+        self._loop_depth -= 1
+        if iterator_name:
+            self._loop_iterators.discard(iterator_name)
 
         # Total complexity: iterations * body
         return Mul(iter_complexity, body_complexity)
@@ -477,7 +572,15 @@ class ComplexityAnalyzer:
         # - Linear decrement (n -> n - 1): O(n)
         # - Unknown: use heuristic
 
+        if self._is_while_true(node.condition):
+            if not self._block_contains_break(node.body):
+                return InfiniteExpr("while True loop has no break")
+            self._has_early_exit = True
+            self._best_case = COMPLEXITY_O1
+
+        self._loop_depth += 1
         body_complexity = self._analyze_block(node.body)
+        self._loop_depth -= 1
 
         # Try to detect halving pattern
         halving = self._detect_halving_loop(node.condition, node.body)
@@ -520,6 +623,15 @@ class ComplexityAnalyzer:
 
         # Look for assignment inside body that halves the variable
         for stmt in body:
+            if isinstance(stmt, AugmentedAssignmentNode):
+                if (
+                    isinstance(stmt.target, IdentifierNode)
+                    and stmt.target.name == var_name
+                    and stmt.operator == "//="
+                    and isinstance(stmt.value, NumberNode)
+                    and stmt.value.value == 2
+                ):
+                    return Var(var_name)
             if isinstance(stmt, AssignmentNode):
                 if (
                     isinstance(stmt.target, IdentifierNode)
@@ -538,9 +650,23 @@ class ComplexityAnalyzer:
                                     isinstance(stmt.value.left, IdentifierNode)
                                     and stmt.value.left.name == var_name
                                 ):
-                                    return Param(var_name)
+                                    return Var(var_name)
 
         return None
+
+    def _is_while_true(self, condition: ASTNode) -> bool:
+        return isinstance(condition, BooleanNode) and condition.value is True
+
+    def _block_contains_break(self, nodes: List[ASTNode]) -> bool:
+        for node in nodes or []:
+            if isinstance(node, BreakNode):
+                return True
+            for child in self._get_node_children(node):
+                if isinstance(child, BreakNode):
+                    return True
+                if self._block_contains_break([child]):
+                    return True
+        return False
 
     def _extract_iterable_complexity(self, iterable: ASTNode) -> ComplexityExpr:
         """Extract complexity (iteration count) from an iterable expression."""
@@ -594,12 +720,14 @@ class ComplexityAnalyzer:
                 return Var(arg.name)
             if isinstance(arg, NumberNode):
                 return Const(arg.value)
-            return self._analyze_node(arg)
+            if isinstance(arg, BinaryOpNode) and arg.operator == "*":
+                return Mul(self._range_bound_expr(arg.left), self._range_bound_expr(arg.right))
+            return self._range_bound_expr(arg)
 
         elif len(args) == 2:
             # range(a, b) → O(b - a)
-            left = self._analyze_node(args[0])
-            right = self._analyze_node(args[1])
+            left = self._range_bound_expr(args[0])
+            right = self._range_bound_expr(args[1])
             # O(b - a) = O(max(b, a)) when both are positive
             return self._combine_max([left, right])
 
@@ -612,12 +740,21 @@ class ComplexityAnalyzer:
                 pass
 
             # Default: use the larger bound
-            left = self._analyze_node(args[0])
-            right = self._analyze_node(args[1])
+            left = self._range_bound_expr(args[0])
+            right = self._range_bound_expr(args[1])
             return self._combine_max([left, right])
 
         # Unknown range
         return Var("n")
+
+    def _range_bound_expr(self, node: ASTNode) -> ComplexityExpr:
+        if isinstance(node, IdentifierNode):
+            return Param(node.name) if node.name in self._params else Var(node.name)
+        if isinstance(node, NumberNode):
+            return Const(node.value)
+        if isinstance(node, BinaryOpNode) and node.operator == "*":
+            return Mul(self._range_bound_expr(node.left), self._range_bound_expr(node.right))
+        return self._analyze_node(node)
 
     def _analyze_function_call(self, call: FunctionCallNode) -> ComplexityExpr:
         """Analyze a function call, using the function body if available."""
@@ -626,6 +763,10 @@ class ComplexityAnalyzer:
             if isinstance(call.function, IdentifierNode)
             else "unknown"
         )
+
+        builtin = self._analyze_builtin_call(func_name, call.arguments)
+        if builtin is not None:
+            return builtin
 
         # Check if we have the function definition
         if func_name in self._functions:
@@ -642,6 +783,11 @@ class ComplexityAnalyzer:
 
             # Check if function calls itself (recursion)
             is_recursive = self._function_calls_itself(func_def, func_name)
+            if is_recursive:
+                recurrence = self._analyze_recursive_function(func_def)
+                if recurrence is not None:
+                    self._function_cache[func_name] = recurrence
+                    return recurrence
 
             # Mark as being analyzed
             self._analyzing.add(func_name)
@@ -680,12 +826,177 @@ class ComplexityAnalyzer:
 
             return body_complexity
 
-        # Unknown function - assume O(1) or O(n) based on context
+        if self._loop_depth > 0:
+            reason = f"Call to unanalyzable function '{func_name}' inside loop"
+            self._fallback_reason = self._fallback_reason or reason
+            return UnknownExpr(reason)
+
+        # Unknown function outside loops is treated as a fixed-cost external call.
         return Const(1)
+
+    def _analyze_builtin_call(
+        self, func_name: str, arguments: List[ASTNode]
+    ) -> Optional[ComplexityExpr]:
+        if func_name in {"len", "int", "float", "bool", "range"}:
+            return Const(1)
+
+        if func_name == "list" and arguments:
+            arg = arguments[0]
+            if isinstance(arg, FunctionCallNode) and isinstance(
+                arg.function, IdentifierNode
+            ) and arg.function.name == "range":
+                return self._extract_range_complexity(arg)
+            return self._analyze_node(arg)
+
+        if func_name in {"str", "print"} and arguments:
+            arg = arguments[0]
+            if isinstance(arg, (IdentifierNode, ListNode, IndexNode)):
+                return Var(self._node_bound_name(arg) or "n")
+            return self._analyze_node(arg)
+
+        return None
+
+    def _analyze_method_call(self, call: MethodCallNode) -> ComplexityExpr:
+        method = call.method.name if isinstance(call.method, IdentifierNode) else call.method
+        if method == "append":
+            return Const(1)
+        if method == "pop":
+            if call.arguments and isinstance(call.arguments[0], NumberNode):
+                if call.arguments[0].value == 0:
+                    return Var(self._node_bound_name(call.object) or "n")
+            return Const(1)
+        return Const(1)
+
+    def _node_bound_name(self, node: ASTNode) -> Optional[str]:
+        if isinstance(node, IdentifierNode):
+            return node.name
+        if isinstance(node, IndexNode):
+            return self._node_bound_name(node.collection)
+        return None
 
     def _function_calls_itself(self, func_def: FunctionDefNode, func_name: str) -> bool:
         """Check if function definition contains a call to itself."""
         return self._contains_function_call(func_def.body, func_name)
+
+    def _analyze_recursive_function(
+        self, func_def: FunctionDefNode
+    ) -> Optional[ComplexityExpr]:
+        func_name = func_def.name.name
+        param_names = [p.name for p in func_def.parameters]
+        primary = param_names[0] if param_names else "n"
+
+        if self._has_loop_wrapped_recursive_call(func_def.body, func_name, primary):
+            return Factorial(Var(primary))
+
+        reductions: List[str] = []
+
+        def walk(node: ASTNode) -> None:
+            if isinstance(node, FunctionCallNode):
+                called = (
+                    node.function.name
+                    if isinstance(node.function, IdentifierNode)
+                    else None
+                )
+                if called == func_name and node.arguments:
+                    reductions.append(self._classify_reduction(node.arguments[0], primary))
+            for child in self._get_node_children(node):
+                walk(child)
+
+        for stmt in func_def.body or []:
+            walk(stmt)
+
+        if not reductions:
+            return None
+        if "unknown" in reductions:
+            reason = f"Recursive reduction for '{func_name}' is not statically resolvable"
+            self._fallback_reason = self._fallback_reason or reason
+            return UnknownExpr(reason)
+
+        call_count = len(reductions)
+        all_half = all(r == "half" for r in reductions)
+        all_minus = all(r == "minus_const" for r in reductions)
+        linear_work = self._body_has_linear_work(func_def.body, primary, func_name)
+
+        if call_count == 1 and all_half:
+            return Log(Var(primary))
+        if call_count == 1 and all_minus:
+            return Mul(Var(primary), Var(primary)) if linear_work else Var(primary)
+        if call_count == 2 and all_half:
+            return Mul(Var(primary), Log(Var(primary))) if linear_work else Var(primary)
+        if call_count == 2 and all_minus:
+            return Exponential(2)
+        if call_count >= 3 and all_minus:
+            return Exponential(call_count)
+
+        reason = f"Recursive pattern for '{func_name}' is not supported"
+        self._fallback_reason = self._fallback_reason or reason
+        return UnknownExpr(reason)
+
+    def _classify_reduction(self, arg: ASTNode, param_name: str) -> str:
+        if isinstance(arg, BinaryOpNode):
+            if (
+                arg.operator == "//"
+                and isinstance(arg.left, IdentifierNode)
+                and arg.left.name == param_name
+                and isinstance(arg.right, NumberNode)
+                and arg.right.value == 2
+            ):
+                return "half"
+            if (
+                arg.operator == "-"
+                and isinstance(arg.left, IdentifierNode)
+                and arg.left.name == param_name
+                and isinstance(arg.right, NumberNode)
+            ):
+                return "minus_const"
+        return "unknown"
+
+    def _has_loop_wrapped_recursive_call(
+        self, nodes: List[ASTNode], func_name: str, param_name: str
+    ) -> bool:
+        for node in nodes or []:
+            if isinstance(node, ForNode):
+                bound = self._extract_iterable_complexity(node.iterable)
+                if self._expr_mentions_bound(bound, param_name):
+                    for stmt in node.body:
+                        if self._node_calls_function(stmt, func_name):
+                            return True
+            for child in self._get_node_children(node):
+                if self._has_loop_wrapped_recursive_call([child], func_name, param_name):
+                    return True
+        return False
+
+    def _body_has_linear_work(
+        self, nodes: List[ASTNode], param_name: str, func_name: str
+    ) -> bool:
+        for node in nodes or []:
+            if isinstance(node, ForNode):
+                bound = self._extract_iterable_complexity(node.iterable)
+                if self._expr_mentions_bound(bound, param_name):
+                    return True
+            if isinstance(node, FunctionCallNode):
+                called = (
+                    node.function.name
+                    if isinstance(node.function, IdentifierNode)
+                    else None
+                )
+                if called == func_name:
+                    continue
+            for child in self._get_node_children(node):
+                if self._body_has_linear_work([child], param_name, func_name):
+                    return True
+        return False
+
+    def _expr_mentions_bound(self, expr: ComplexityExpr, name: str) -> bool:
+        if isinstance(expr, (Param, Var)):
+            return expr.name == name
+        if isinstance(expr, Log):
+            return self._expr_mentions_bound(expr.inner, name)
+        if isinstance(expr, (Add, Mul)):
+            return self._expr_mentions_bound(expr.left, name) or self._expr_mentions_bound(
+                expr.right, name
+            )
+        return False
 
     def _contains_function_call(self, nodes: List[ASTNode], func_name: str) -> bool:
         """Check if any node in the list contains a call to func_name."""
@@ -886,15 +1197,40 @@ class ComplexityAnalyzer:
         simplified = self._simplify(expr)
 
         # Then convert to Big-O string and determine confidence
-        complexity_str, confidence, bound_symbol = self._complexity_to_big_o(simplified)
+        (
+            complexity_str,
+            confidence,
+            bound_symbol,
+            display_complexity,
+            bound_symbols,
+        ) = self._classify_expression(simplified)
 
         explanation = self._generate_explanation(simplified)
+        method = "static"
+        fallback_reason = None
+        if complexity_str == COMPLEXITY_UNKNOWN:
+            method = "unknown"
+            fallback_reason = self._fallback_reason or (
+                simplified.reason
+                if isinstance(simplified, UnknownExpr)
+                else "Static analysis could not classify this program"
+            )
+            confidence = 0.0
+        elif complexity_str == COMPLEXITY_UNBOUNDED:
+            method = "unbounded"
 
         return ComplexityResult(
             complexity=complexity_str,
             confidence=confidence,
             explanation=explanation,
             bound_symbol=bound_symbol,
+            display_complexity=display_complexity,
+            method=method,
+            bound_symbols=bound_symbols,
+            best_case=self._best_case,
+            worst_case=complexity_str,
+            has_early_exit=self._has_early_exit,
+            fallback_reason=fallback_reason,
         )
 
     def _simplify(self, expr: ComplexityExpr) -> ComplexityExpr:
@@ -976,70 +1312,160 @@ class ComplexityAnalyzer:
         Returns:
             (complexity_string, confidence, bound_symbol)
         """
-        if isinstance(expr, Const):
-            # For Big-O, any constant is O(1), but show actual value for clarity
-            if expr.value > 1:
-                return f"O({int(expr.value)})", 1.0, None
-            return "O(1)", 1.0, None
+        canonical, confidence, bound, _display, _bounds = self._classify_expression(expr)
+        return canonical, confidence, bound
 
-        if isinstance(expr, Param):
-            return f"O({expr.name})", 1.0, expr.name
+    def _classify_expression(
+        self, expr: ComplexityExpr
+    ) -> Tuple[str, float, Optional[str], str, List[str]]:
+        if isinstance(expr, UnknownExpr):
+            return COMPLEXITY_UNKNOWN, 0.0, None, COMPLEXITY_UNKNOWN, []
 
-        if isinstance(expr, Var):
-            return "O(n)", 0.7, "n"
+        if isinstance(expr, InfiniteExpr):
+            return COMPLEXITY_UNBOUNDED, 1.0, None, COMPLEXITY_UNBOUNDED, []
 
-        if isinstance(expr, Log):
-            # log(n) where n is a parameter - high confidence
-            if isinstance(expr.inner, Param):
-                return f"O(log {expr.inner.name})", 1.0, expr.inner.name
-            # Unknown inner - lower confidence
-            return "O(log n)", 0.7, "n"
+        if isinstance(expr, Exponential):
+            if expr.branch_factor == 2:
+                return COMPLEXITY_EXP, 0.9, "n", COMPLEXITY_EXP, ["n"]
+            display = f"O({expr.branch_factor}^n)"
+            return COMPLEXITY_KN, 0.9, "n", display, ["n"]
 
         if isinstance(expr, Factorial):
-            # factorial(n) - high confidence if parameter known
-            if isinstance(expr.inner, Param):
-                return f"O({expr.inner.name}!)", 1.0, expr.inner.name
-            return "O(n!)", 0.9, "n"
+            bounds = self._collect_bounds(expr.inner) or ["n"]
+            return COMPLEXITY_NF, 0.9, bounds[0], COMPLEXITY_NF, bounds
+
+        if isinstance(expr, Const):
+            return COMPLEXITY_O1, 1.0, None, COMPLEXITY_O1, []
+
+        if isinstance(expr, Param):
+            return COMPLEXITY_N, 1.0, expr.name, COMPLEXITY_N, [expr.name]
+
+        if isinstance(expr, Var):
+            return COMPLEXITY_N, 0.7, expr.name, COMPLEXITY_N, [expr.name]
+
+        if isinstance(expr, Log):
+            bounds = self._collect_bounds(expr.inner) or ["n"]
+            return COMPLEXITY_LOGN, self._get_confidence(expr), bounds[0], COMPLEXITY_LOGN, bounds
 
         if isinstance(expr, Add):
-            left_str, left_conf, _ = self._complexity_to_big_o(expr.left)
-            right_str, right_conf, _ = self._complexity_to_big_o(expr.right)
-
-            # Take the maximum (higher complexity)
-            # Compare complexity levels
-            left_level = self._complexity_level(expr.left)
-            right_level = self._complexity_level(expr.right)
-
-            if left_level >= right_level:
-                return left_str, min(left_conf, right_conf), self._get_bound(expr.left)
-            else:
-                return (
-                    right_str,
-                    min(left_conf, right_conf),
-                    self._get_bound(expr.right),
-                )
+            return self._classify_add(expr)
 
         if isinstance(expr, Mul):
-            # Compute the product level (nesting depth)
-            left_level = self._complexity_level(expr.left)
-            right_level = self._complexity_level(expr.right)
-            total_level = left_level + right_level
-
-            # Get confidence from the parts
-            left_conf = self._get_confidence(expr.left)
-            right_conf = self._get_confidence(expr.right)
-            confidence = min(left_conf, right_conf)
-
-            # Determine the bound symbol
-            bound = self._get_bound(expr)
-
-            # Map level to Big-O string
-            complexity_str = self._level_to_string(total_level, bound)
-
-            return complexity_str, confidence, bound
+            return self._classify_mul(expr)
 
         # Fallback for unknown expressions
-        return "Unknown", 0.5, None
+        return COMPLEXITY_UNKNOWN, 0.0, None, COMPLEXITY_UNKNOWN, []
+
+    def _classify_add(
+        self, expr: Add
+    ) -> Tuple[str, float, Optional[str], str, List[str]]:
+        terms = self._flatten_add(expr)
+        classified = [self._classify_expression(term) for term in terms]
+        if any(c[0] == COMPLEXITY_UNBOUNDED for c in classified):
+            return COMPLEXITY_UNBOUNDED, 1.0, None, COMPLEXITY_UNBOUNDED, []
+        if any(c[0] == COMPLEXITY_UNKNOWN for c in classified):
+            return COMPLEXITY_UNKNOWN, 0.0, None, COMPLEXITY_UNKNOWN, []
+
+        linear_terms = [c for c in classified if c[0] == COMPLEXITY_N]
+        if len(linear_terms) == len(classified):
+            bounds = self._dedupe([b for c in classified for b in c[4]])
+            if len(bounds) > 1:
+                return COMPLEXITY_N_PLUS_M, min(c[1] for c in classified), bounds[0], COMPLEXITY_N_PLUS_M, bounds
+            return COMPLEXITY_N, min(c[1] for c in classified), bounds[0] if bounds else "n", COMPLEXITY_N, bounds or ["n"]
+
+        dominant = max(classified, key=lambda c: self._class_rank(c[0]))
+        return (
+            dominant[0],
+            min(c[1] for c in classified),
+            dominant[2],
+            dominant[3],
+            dominant[4],
+        )
+
+    def _classify_mul(
+        self, expr: Mul
+    ) -> Tuple[str, float, Optional[str], str, List[str]]:
+        factors = [f for f in self._flatten_mul(expr) if not isinstance(f, Const)]
+        if not factors:
+            return COMPLEXITY_O1, 1.0, None, COMPLEXITY_O1, []
+
+        classified = [self._classify_expression(f) for f in factors]
+        if any(c[0] == COMPLEXITY_UNBOUNDED for c in classified):
+            return COMPLEXITY_UNBOUNDED, 1.0, None, COMPLEXITY_UNBOUNDED, []
+        if any(c[0] == COMPLEXITY_UNKNOWN for c in classified):
+            return COMPLEXITY_UNKNOWN, 0.0, None, COMPLEXITY_UNKNOWN, []
+
+        confidence = min(c[1] for c in classified)
+        bounds = self._dedupe([b for c in classified for b in c[4]]) or ["n"]
+        linear_count = sum(1 for c in classified if c[0] in {COMPLEXITY_N, COMPLEXITY_N_M, COMPLEXITY_N_PLUS_M})
+        log_count = sum(1 for c in classified if c[0] == COMPLEXITY_LOGN)
+        n2_count = sum(1 for c in classified if c[0] == COMPLEXITY_N2)
+        n3_count = sum(1 for c in classified if c[0] == COMPLEXITY_N3)
+        nk_count = sum(1 for c in classified if c[0] == COMPLEXITY_NK)
+
+        degree = linear_count + (2 * n2_count) + (3 * n3_count) + (4 * nk_count)
+
+        if degree == 0 and log_count:
+            return COMPLEXITY_LOGN, confidence, bounds[0], COMPLEXITY_LOGN, bounds
+        if degree == 1 and log_count:
+            return COMPLEXITY_NLOGN, confidence, bounds[0], COMPLEXITY_NLOGN, bounds
+        if degree == 1:
+            return COMPLEXITY_N, confidence, bounds[0], COMPLEXITY_N, bounds
+        if degree == 2:
+            if len(bounds) > 1 and linear_count >= 2 and not n2_count:
+                return COMPLEXITY_N_M, confidence, bounds[0], COMPLEXITY_N_M, bounds[:2]
+            return COMPLEXITY_N2, confidence, bounds[0], COMPLEXITY_N2, bounds
+        if degree == 3:
+            return COMPLEXITY_N3, confidence, bounds[0], COMPLEXITY_N3, bounds
+        if degree >= 4:
+            return COMPLEXITY_NK, confidence, bounds[0], f"O(n^{degree})", bounds
+
+        dominant = max(classified, key=lambda c: self._class_rank(c[0]))
+        return dominant[0], confidence, dominant[2], dominant[3], dominant[4]
+
+    def _flatten_add(self, expr: ComplexityExpr) -> List[ComplexityExpr]:
+        if isinstance(expr, Add):
+            return self._flatten_add(expr.left) + self._flatten_add(expr.right)
+        return [expr]
+
+    def _flatten_mul(self, expr: ComplexityExpr) -> List[ComplexityExpr]:
+        if isinstance(expr, Mul):
+            return self._flatten_mul(expr.left) + self._flatten_mul(expr.right)
+        return [expr]
+
+    def _collect_bounds(self, expr: ComplexityExpr) -> List[str]:
+        if isinstance(expr, (Param, Var)):
+            return [expr.name]
+        if isinstance(expr, Log):
+            return self._collect_bounds(expr.inner)
+        if isinstance(expr, (Add, Mul)):
+            return self._dedupe(self._collect_bounds(expr.left) + self._collect_bounds(expr.right))
+        return []
+
+    def _dedupe(self, values: List[str]) -> List[str]:
+        result: List[str] = []
+        for value in values:
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    def _class_rank(self, complexity: str) -> int:
+        ranks = {
+            COMPLEXITY_O1: 0,
+            COMPLEXITY_LOGN: 1,
+            COMPLEXITY_N: 2,
+            COMPLEXITY_N_PLUS_M: 3,
+            COMPLEXITY_NLOGN: 4,
+            COMPLEXITY_N_M: 5,
+            COMPLEXITY_N2: 6,
+            COMPLEXITY_N3: 7,
+            COMPLEXITY_NK: 8,
+            COMPLEXITY_EXP: 9,
+            COMPLEXITY_KN: 10,
+            COMPLEXITY_NF: 11,
+            COMPLEXITY_UNBOUNDED: 12,
+        }
+        return ranks.get(complexity, -1)
 
     def _get_confidence(self, expr: ComplexityExpr) -> float:
         """Get confidence level for an expression."""

@@ -42,6 +42,7 @@ __all__ = [
 ]
 
 from .complexity import analyze_complexity as static_analyze_complexity
+from ..types.constants import COMPLEXITY_UNKNOWN
 from ..types.constants import COMPLEXITY_POINTS
 
 # ---------------------------------------------------------------------------
@@ -564,45 +565,37 @@ class Scorer:
             (complexity_class, complexity_subscore, efficiency_subscore,
              profiling_partial_flag, optimizer_partial_flag)
         """
-        # Complexity sub-score — try static analysis first
-        complexity_class = "Unknown"
+        # Complexity sub-score — use the unified profiler/static result first.
+        complexity_class = COMPLEXITY_UNKNOWN
         profiling_partial = False
 
-        if self._ast is not None:
-            # Use static complexity analysis
+        if self._profiling is not None:
+            complexity_class = (
+                self._profiling.get("complexity_worst_case")
+                or self._profiling.get("complexity_estimate")
+                or (_detect_complexity(self._line_stats) if self._line_stats else None)
+                or COMPLEXITY_UNKNOWN
+            )
+            profiling_partial = complexity_class == COMPLEXITY_UNKNOWN
+        elif self._ast is not None:
+            # No profiling was supplied; use static complexity analysis directly.
             try:
                 static_result = static_analyze_complexity(self._ast)
-                complexity_class = static_result.complexity
-                # Static analysis with high confidence doesn't need profiling fallback
-                if static_result.confidence >= 1.0:
-                    profiling_partial = False
-                else:
-                    # Medium confidence - still use profiler if available
-                    profiling_partial = False
+                complexity_class = static_result.worst_case or static_result.complexity
+                profiling_partial = complexity_class == COMPLEXITY_UNKNOWN
             except Exception:
-                # Static analysis failed, fall through to profiler
-                pass
-
-        # Fall back to profiler if static didn't work
-        if (
-            complexity_class == "Unknown"
-            and self._line_stats
-            and self._profiling is not None
-        ):
-            complexity_class = self._profiling.get(
-                "complexity_estimate"
-            ) or _detect_complexity(self._line_stats)
+                complexity_class = COMPLEXITY_UNKNOWN
+                profiling_partial = True
+        elif self._line_stats:
+            complexity_class = _detect_complexity(self._line_stats)
             profiling_partial = False
-        elif complexity_class == "Unknown":
-            # No static analysis and no profiler - use partial credit
-            c_sub = PARTIAL_COMPLEXITY
+        else:
             profiling_partial = True
-            complexity_class = "Unknown"
 
         # Calculate complexity sub-score
-        if complexity_class != "Unknown" and self._line_stats:
+        if complexity_class != COMPLEXITY_UNKNOWN and self._line_stats:
             c_sub = _coverage_weighted_complexity(complexity_class, self._line_stats)
-        elif complexity_class != "Unknown":
+        elif complexity_class != COMPLEXITY_UNKNOWN:
             # Have complexity but no line stats - give full marks
             c_sub = COMPLEXITY_POINTS.get(complexity_class, PARTIAL_COMPLEXITY)
         else:
