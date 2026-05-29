@@ -8,7 +8,7 @@ A Python-inspired interpreter with built-in profiling, static complexity analysi
 [![PyPI version](https://img.shields.io/pypi/v/optilang.svg)](https://pypi.org/project/optilang/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/optilang.svg)](https://pypi.org/project/optilang/)
 
-OptiLang `1.0.1` ships the full source-to-insight pipeline:
+OptiLang `1.0.2` ships the full source-to-insight pipeline:
 
 `source -> tokens -> AST -> semantic checks -> execution -> profiling -> static complexity -> optimization suggestions -> score`
 
