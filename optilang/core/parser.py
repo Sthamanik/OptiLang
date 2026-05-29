@@ -6,7 +6,8 @@ Grammar:
                 return | break | continue | pass | try | expr_stmt
     expression → logical_or (precedence: logical_or → logical_and → equality →
                 comparison → term → factor → unary → power → primary)
-    primary → NUMBER | STRING | TRUE | FALSE | NONE | IDENTIFIER | call | list | dict | index
+    primary → NUMBER | STRING | TRUE | FALSE | NONE | IDENTIFIER
+            | call | list | dict | index
     call → IDENTIFIER LPAREN args? RPAREN
     list → LBRACKET (expr (COMMA expr)*)? RBRACKET
     dict → LBRACE (expr COLON expr (COMMA expr COLON expr)*)? RBRACE

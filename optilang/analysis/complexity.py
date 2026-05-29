@@ -721,7 +721,10 @@ class ComplexityAnalyzer:
             if isinstance(arg, NumberNode):
                 return Const(arg.value)
             if isinstance(arg, BinaryOpNode) and arg.operator == "*":
-                return Mul(self._range_bound_expr(arg.left), self._range_bound_expr(arg.right))
+                return Mul(
+                    self._range_bound_expr(arg.left),
+                    self._range_bound_expr(arg.right),
+                )
             return self._range_bound_expr(arg)
 
         elif len(args) == 2:
@@ -753,7 +756,10 @@ class ComplexityAnalyzer:
         if isinstance(node, NumberNode):
             return Const(node.value)
         if isinstance(node, BinaryOpNode) and node.operator == "*":
-            return Mul(self._range_bound_expr(node.left), self._range_bound_expr(node.right))
+            return Mul(
+                self._range_bound_expr(node.left),
+                self._range_bound_expr(node.right),
+            )
         return self._analyze_node(node)
 
     def _analyze_function_call(self, call: FunctionCallNode) -> ComplexityExpr:
@@ -842,9 +848,11 @@ class ComplexityAnalyzer:
 
         if func_name == "list" and arguments:
             arg = arguments[0]
-            if isinstance(arg, FunctionCallNode) and isinstance(
-                arg.function, IdentifierNode
-            ) and arg.function.name == "range":
+            if (
+                isinstance(arg, FunctionCallNode)
+                and isinstance(arg.function, IdentifierNode)
+                and arg.function.name == "range"
+            ):
                 return self._extract_range_complexity(arg)
             return self._analyze_node(arg)
 
@@ -857,7 +865,9 @@ class ComplexityAnalyzer:
         return None
 
     def _analyze_method_call(self, call: MethodCallNode) -> ComplexityExpr:
-        method = call.method.name if isinstance(call.method, IdentifierNode) else call.method
+        method = (
+            call.method.name if isinstance(call.method, IdentifierNode) else call.method
+        )
         if method == "append":
             return Const(1)
         if method == "pop":
@@ -898,7 +908,8 @@ class ComplexityAnalyzer:
                     else None
                 )
                 if called == func_name and node.arguments:
-                    reductions.append(self._classify_reduction(node.arguments[0], primary))
+                    arg = node.arguments[0]
+                reductions.append(self._classify_reduction(arg, primary))
             for child in self._get_node_children(node):
                 walk(child)
 
@@ -908,7 +919,9 @@ class ComplexityAnalyzer:
         if not reductions:
             return None
         if "unknown" in reductions:
-            reason = f"Recursive reduction for '{func_name}' is not statically resolvable"
+            reason = (
+                f"Recursive reduction for '{func_name}'" " is not statically resolvable"
+            )
             self._fallback_reason = self._fallback_reason or reason
             return UnknownExpr(reason)
 
@@ -962,7 +975,9 @@ class ComplexityAnalyzer:
                         if self._node_calls_function(stmt, func_name):
                             return True
             for child in self._get_node_children(node):
-                if self._has_loop_wrapped_recursive_call([child], func_name, param_name):
+                if self._has_loop_wrapped_recursive_call(
+                    [child], func_name, param_name
+                ):
                     return True
         return False
 
@@ -993,9 +1008,8 @@ class ComplexityAnalyzer:
         if isinstance(expr, Log):
             return self._expr_mentions_bound(expr.inner, name)
         if isinstance(expr, (Add, Mul)):
-            return self._expr_mentions_bound(expr.left, name) or self._expr_mentions_bound(
-                expr.right, name
-            )
+            left = self._expr_mentions_bound(expr.left, name)
+            return left or self._expr_mentions_bound(expr.right, name)
         return False
 
     def _contains_function_call(self, nodes: List[ASTNode], func_name: str) -> bool:
@@ -1312,7 +1326,8 @@ class ComplexityAnalyzer:
         Returns:
             (complexity_string, confidence, bound_symbol)
         """
-        canonical, confidence, bound, _display, _bounds = self._classify_expression(expr)
+        result = self._classify_expression(expr)
+        canonical, confidence, bound, _display, _bounds = result
         return canonical, confidence, bound
 
     def _classify_expression(
@@ -1345,7 +1360,13 @@ class ComplexityAnalyzer:
 
         if isinstance(expr, Log):
             bounds = self._collect_bounds(expr.inner) or ["n"]
-            return COMPLEXITY_LOGN, self._get_confidence(expr), bounds[0], COMPLEXITY_LOGN, bounds
+            return (
+                COMPLEXITY_LOGN,
+                self._get_confidence(expr),
+                bounds[0],
+                COMPLEXITY_LOGN,
+                bounds,
+            )
 
         if isinstance(expr, Add):
             return self._classify_add(expr)
@@ -1370,8 +1391,20 @@ class ComplexityAnalyzer:
         if len(linear_terms) == len(classified):
             bounds = self._dedupe([b for c in classified for b in c[4]])
             if len(bounds) > 1:
-                return COMPLEXITY_N_PLUS_M, min(c[1] for c in classified), bounds[0], COMPLEXITY_N_PLUS_M, bounds
-            return COMPLEXITY_N, min(c[1] for c in classified), bounds[0] if bounds else "n", COMPLEXITY_N, bounds or ["n"]
+                return (
+                    COMPLEXITY_N_PLUS_M,
+                    min(c[1] for c in classified),
+                    bounds[0],
+                    COMPLEXITY_N_PLUS_M,
+                    bounds,
+                )
+            return (
+                COMPLEXITY_N,
+                min(c[1] for c in classified),
+                bounds[0] if bounds else "n",
+                COMPLEXITY_N,
+                bounds or ["n"],
+            )
 
         dominant = max(classified, key=lambda c: self._class_rank(c[0]))
         return (
@@ -1397,7 +1430,11 @@ class ComplexityAnalyzer:
 
         confidence = min(c[1] for c in classified)
         bounds = self._dedupe([b for c in classified for b in c[4]]) or ["n"]
-        linear_count = sum(1 for c in classified if c[0] in {COMPLEXITY_N, COMPLEXITY_N_M, COMPLEXITY_N_PLUS_M})
+        linear_count = sum(
+            1
+            for c in classified
+            if c[0] in {COMPLEXITY_N, COMPLEXITY_N_M, COMPLEXITY_N_PLUS_M}
+        )
         log_count = sum(1 for c in classified if c[0] == COMPLEXITY_LOGN)
         n2_count = sum(1 for c in classified if c[0] == COMPLEXITY_N2)
         n3_count = sum(1 for c in classified if c[0] == COMPLEXITY_N3)
@@ -1439,7 +1476,9 @@ class ComplexityAnalyzer:
         if isinstance(expr, Log):
             return self._collect_bounds(expr.inner)
         if isinstance(expr, (Add, Mul)):
-            return self._dedupe(self._collect_bounds(expr.left) + self._collect_bounds(expr.right))
+            left = self._collect_bounds(expr.left)
+            right = self._collect_bounds(expr.right)
+            return self._dedupe(left + right)
         return []
 
     def _dedupe(self, values: List[str]) -> List[str]:

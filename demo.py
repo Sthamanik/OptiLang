@@ -254,6 +254,7 @@ def _run_pipeline(source: str) -> DemoReport:
 
     optimizer_report: Optional[OptimizationReport] = None
     optimizer_note: Optional[str] = None
+    ast = None
     try:
         ast = parse(tokenize(source))
         optimizer_report = Optimizer(
@@ -269,6 +270,7 @@ def _run_pipeline(source: str) -> DemoReport:
         optimizer_report=optimizer_report,
         source_lines=len(_source_lines(source)),
         errors=result.errors,
+        ast=ast,
     )
     return DemoReport(
         execution=result,
@@ -404,14 +406,23 @@ for i in numbers:
 """
 
 PROGRAM_11 = """\
-# O(1) — Dictionary Lookup
+items = [1, 2, 3]
 
-student = {
-    "name": "Manik",
-    "age": 20
-}
+def arrange(current, remaining):
+    if len(remaining) == 0:
+        print(current)
+        return
 
-print(student["name"])
+    for item in remaining:
+        new_remaining = []
+
+        for x in remaining:
+            if x != item:
+                new_remaining.append(x)
+
+        arrange(current + [item], new_remaining)
+
+arrange([], items)
 
 """
 

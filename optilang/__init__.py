@@ -123,21 +123,21 @@ __all__ = [
 # This allows `from optilang.lexer import tokenize` to work
 # even though lexer.py is now in optilang/core/
 _module_map = {
-    'lexer': 'optilang.core.lexer',
-    'parser': 'optilang.core.parser',
-    'token': 'optilang.core.token',
-    'ast_nodes': 'optilang.core.ast_nodes',
-    'executor': 'optilang.runtime.executor',
-    'optimizer': 'optilang.analysis.optimizer',
-    'scoring': 'optilang.analysis.scoring',
-    'complexity': 'optilang.analysis.complexity',
-    'semantic_analyzer': 'optilang.analysis.semantic_analyzer',
-    'models': 'optilang.types.models',
-    'constants': 'optilang.types.constants',
+    "lexer": "optilang.core.lexer",
+    "parser": "optilang.core.parser",
+    "token": "optilang.core.token",
+    "ast_nodes": "optilang.core.ast_nodes",
+    "executor": "optilang.runtime.executor",
+    "optimizer": "optilang.analysis.optimizer",
+    "scoring": "optilang.analysis.scoring",
+    "complexity": "optilang.analysis.complexity",
+    "semantic_analyzer": "optilang.analysis.semantic_analyzer",
+    "models": "optilang.types.models",
+    "constants": "optilang.types.constants",
 }
 
 # Special handling for profiler - use __getattr__ for import, CLI via runtime
-_extra_imports = {'profiler': 'optilang.runtime.profiler'}
+_extra_imports = {"profiler": "optilang.runtime.profiler"}
 
 
 def __getattr__(name: str) -> Any:
@@ -150,8 +150,8 @@ def __getattr__(name: str) -> Any:
 
 # Also register in sys.modules for deeper imports (skip profiler due to CLI conflict)
 for name, path in _module_map.items():
-    if f'optilang.{name}' not in sys.modules:
+    if f"optilang.{name}" not in sys.modules:
         try:
-            sys.modules[f'optilang.{name}'] = importlib.import_module(path)
+            sys.modules[f"optilang.{name}"] = importlib.import_module(path)
         except ImportError:
             pass

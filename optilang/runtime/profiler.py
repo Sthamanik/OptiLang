@@ -15,7 +15,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 __all__ = [
     "Profiler",
@@ -39,6 +39,7 @@ from ..core.ast_nodes import (
     BinaryOpNode,
     ForNode,
     IdentifierNode,
+    ProgramNode,
     WhileNode,
 )
 from ..types.constants import (
@@ -1071,7 +1072,7 @@ class Profiler:
         if ast is not None:
             from ..analysis.complexity import analyze_complexity
 
-            static_result = analyze_complexity(ast)
+            static_result = analyze_complexity(cast(ProgramNode, ast))
             if static_result.complexity == COMPLEXITY_UNKNOWN:
                 fallback_reason = static_result.fallback_reason
                 complexity, confidence = detect_complexity_with_confidence(
@@ -1087,7 +1088,7 @@ class Profiler:
                 display_complexity = static_result.display_complexity
                 worst_case = static_result.worst_case
                 best_case = static_result.best_case
-                bound_symbols = static_result.bound_symbols
+                bound_symbols = static_result.bound_symbols or []
                 has_early_exit = static_result.has_early_exit
                 fallback_reason = static_result.fallback_reason
         else:
@@ -1100,9 +1101,10 @@ class Profiler:
         sampling_adjusted_confidence = confidence * (0.5 + (0.5 * sampling_rate))
         self.data.complexity_estimate = complexity
         self.data.complexity_method = method
+        cap = 1.0 if method in {"static", "unbounded"} else 0.99
         self.data.complexity_confidence = max(
             0.0 if complexity == COMPLEXITY_UNKNOWN else 0.05,
-            min(1.0 if method in {"static", "unbounded"} else 0.99, sampling_adjusted_confidence),
+            min(cap, sampling_adjusted_confidence),
         )
         self.data.complexity_display = display_complexity or complexity
         self.data.complexity_worst_case = worst_case or complexity
