@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-05-29
+
+### Added
+- Indexed assignment and indexed augmented assignment support
+- Enhanced indexing and slicing support in parser and executor
+- `MethodCallNode` support with parsing and execution for method calls
+- Tuple unpacking with indices and O(n!) complexity detection
+- Exponential and unbounded complexity classes
+- Loop depth tracking in executor for improved execution control
+
+### Changed
+- Major module restructuring: moved code into `core/`, `runtime/`, `analysis/`, `types/` packages with backward-compatible lazy loading
+- Enhanced complexity detection with nested structure checks, loop depth analysis, and hot line ratio integration
+- Simplified scorer complexity classification and improved efficiency suggestion output
+- Removed ML-based analysis pipeline; simplified to static pattern detection
+- Improved code formatting and organization across multiple files
+- Cleaned up tests and reorganized imports
+
+### Fixed
+- Improved profiler complexity detection logic for more accurate hot line analysis
+
+## [1.0.1] - 2026-05-20
+
+### Changed
+- Updated README for clarity and accuracy in features and installation instructions
+
 ## [1.0.0] - 2026-04-10
 
 ### Added
@@ -28,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repository setup
 - Development environment configuration
 
-[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.2
+[1.0.1]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.0
 [0.1.0]: https://github.com/Sthamanik/optilang/releases/tag/v0.1.0
