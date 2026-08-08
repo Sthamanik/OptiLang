@@ -330,6 +330,9 @@ class ComplexityAnalyzer:
         self._fallback_reason = None
         self._has_early_exit = False
         self._best_case = None
+        # Register the function itself so a self-recursive call inside its
+        # own body can be detected even when analyzed in isolation.
+        self._functions[func_def.name.name] = func_def
 
         expr = self._analyze_block(func_def.body)
         return self._expr_to_result(expr)
@@ -421,12 +424,12 @@ class ComplexityAnalyzer:
         if isinstance(node, BooleanNode):
             return Const(1)
 
-        # Identifier: O(1) read
+        # Identifier: O(1) read — reading/returning a name never copies or
+        # iterates it, regardless of whether it's a parameter. Size-bound
+        # cost only applies where a name is used as a loop/range bound,
+        # which is handled separately by _range_bound_expr /
+        # _extract_iterable_complexity.
         if isinstance(node, IdentifierNode):
-            # Check if it's a parameter
-            if node.name in self._params:
-                return Param(node.name)
-            # Loop iterators are just variable reads - O(1)
             return Const(1)
 
         # Assignment: complexity of the value expression
@@ -752,7 +755,14 @@ class ComplexityAnalyzer:
 
     def _range_bound_expr(self, node: ASTNode) -> ComplexityExpr:
         if isinstance(node, IdentifierNode):
-            return Param(node.name) if node.name in self._params else Var(node.name)
+            if node.name in self._params:
+                return Param(node.name)
+            # A bounded enclosing loop's own iterator (e.g. `i` in
+            # `range(n - i - 1)`) is not an independent size — it's already
+            # accounted for by the outer loop's own multiplicative factor.
+            if node.name in self._loop_iterators:
+                return Const(1)
+            return Var(node.name)
         if isinstance(node, NumberNode):
             return Const(node.value)
         if isinstance(node, BinaryOpNode) and node.operator == "*":
@@ -760,6 +770,22 @@ class ComplexityAnalyzer:
                 self._range_bound_expr(node.left),
                 self._range_bound_expr(node.right),
             )
+        if isinstance(node, BinaryOpNode) and node.operator in ("+", "-"):
+            return self._combine_max(
+                [self._range_bound_expr(node.left), self._range_bound_expr(node.right)]
+            )
+        if (
+            isinstance(node, FunctionCallNode)
+            and isinstance(node.function, IdentifierNode)
+            and node.function.name == "len"
+            and node.arguments
+        ):
+            bound_name = self._node_bound_name(node.arguments[0])
+            if bound_name:
+                return (
+                    Param(bound_name) if bound_name in self._params else Var(bound_name)
+                )
+            return Var("n")
         return self._analyze_node(node)
 
     def _analyze_function_call(self, call: FunctionCallNode) -> ComplexityExpr:
@@ -857,10 +883,9 @@ class ComplexityAnalyzer:
             return self._analyze_node(arg)
 
         if func_name in {"str", "print"} and arguments:
-            arg = arguments[0]
-            if isinstance(arg, (IdentifierNode, ListNode, IndexNode)):
-                return Var(self._node_bound_name(arg) or "n")
-            return self._analyze_node(arg)
+            return self._combine_max(
+                [self._analyze_node(arg) for arg in arguments]
+            )
 
         return None
 
@@ -909,7 +934,7 @@ class ComplexityAnalyzer:
                 )
                 if called == func_name and node.arguments:
                     arg = node.arguments[0]
-                reductions.append(self._classify_reduction(arg, primary))
+                    reductions.append(self._classify_reduction(arg, primary))
             for child in self._get_node_children(node):
                 walk(child)
 

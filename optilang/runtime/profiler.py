@@ -1078,7 +1078,7 @@ class Profiler:
                 complexity, confidence = detect_complexity_with_confidence(
                     self.data.line_stats,
                     max_loop_depth=max_loop_depth,
-                    ast=None,
+                    ast=ast,
                 )
                 method = "empirical"
             else:

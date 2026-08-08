@@ -406,7 +406,7 @@ for i in numbers:
 """
 
 PROGRAM_11 = """\
-items = [1, 2, 3]
+items = [1, 2, 3, 5, 4, 6, 7]
 
 def arrange(current, remaining):
     if len(remaining) == 0:
@@ -439,9 +439,9 @@ if __name__ == "__main__":
         # ("Program 6 — Linear Traversal", PROGRAM_6),
         # ("Program 7 — Maximum Search", PROGRAM_7),
         # ("Program 8 — String Concatenation", PROGRAM_8),
-        # ("Program 9 — Nested Logarithmic Loop", PROGRAM_9),
-        # ("Program 10 — Nested Loops", PROGRAM_10),
-        ("Program 11 — Bubble Sort", PROGRAM_11),
+         ("Program 9 — Nested Logarithmic Loop", PROGRAM_9),
+        #  ("Program 10 — Nested Loops", PROGRAM_10),
+        # ("Program 11 — Bubble Sort", PROGRAM_11),
     ]
 
     print()
