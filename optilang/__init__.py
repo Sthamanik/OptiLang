@@ -75,7 +75,7 @@ from .analysis.scoring import (
     calculate_score,
 )
 
-__version__ = "2.0.0"
+__version__ = "1.0.4"
 
 __all__ = [
     # ── Core pipeline functions ──

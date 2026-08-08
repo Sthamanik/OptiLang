@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-08-08
+
+### Fixed
+- `__version__` in `optilang/__init__.py` hardcoded to `"2.0.0"`, out of
+  sync with the actual published package version
+
 ## [1.0.3] - 2026-08-08
 
 ### Fixed
@@ -73,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repository setup
 - Development environment configuration
 
-[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.4
 [1.0.3]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.3
 [1.0.2]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.2
 [1.0.1]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.1
