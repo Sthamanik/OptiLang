@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-08
+
+### Fixed
+- Crash in recursive-function complexity analysis (`UnboundLocalError`) when
+  a recursive function's body calls another function before/around its own
+  recursive call
+- `print()`/`str()` fabricating phantom complexity from scalar identifier
+  arguments, inflating simple constant-time programs to `O(n)`
+- Empirical complexity fallback discarding the AST, causing recursion depth
+  to be conflated with loop nesting depth and producing incorrect classes
+  such as `O(n⁴)` for permutation-style recursion
+- Generic identifier reads (assignment/return/arithmetic) being treated as
+  size-bound even for scalar parameter values, and missing self-recursion
+  detection when analyzing a function in isolation via
+  `analyze_function_complexity()`
+- `range()` bound resolution for `len(x)` calls and arithmetic expressions
+  (e.g. `range(len(arr) - i - 1)`), including an enclosing loop's own
+  iterator being miscounted as an independent size variable
+
 ## [1.0.2] - 2026-05-29
 
 ### Added
@@ -54,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repository setup
 - Development environment configuration
 
-[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/Sthamanik/optilang/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.3
 [1.0.2]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.2
 [1.0.1]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Sthamanik/optilang/releases/tag/v1.0.0

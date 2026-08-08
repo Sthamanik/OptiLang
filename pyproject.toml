@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optilang"
-version = "1.0.2"
+version = "1.0.3"
 description = "A Python-inspired interpreter with profiling, optimization analysis, and scoring"
 readme = "README.md"
 requires-python = ">=3.9"
